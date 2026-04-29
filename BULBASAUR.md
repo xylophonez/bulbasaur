@@ -20,6 +20,65 @@ On startup it prints:
 - the configured AO root token process ID
 - the Bulbasaur ledger process ID
 
+## New Components
+
+This branch adds the following Bulbasaur-specific pieces:
+
+- `src/dev_ao_payment.erl`: HyperBEAM device registered as `ao-payment@1.0`.
+  It verifies AO root-token transfers against the configured AO mainnet state
+  endpoint, requires both `Debit-Notice` and `Credit-Notice`, prevents duplicate
+  imports, and then posts an operator-signed local credit into the Bulbasaur
+  ledger.
+- `src/hb_opts.erl`: preloads `ao-payment@1.0` so the verifier device is
+  available through the normal HyperBEAM device map.
+- `scripts/start-bulbasaur.erl` and `scripts/start-bulbasaur.sh`: start the
+  paid node, create/load the local ledger process, wire `p4@1.0` and
+  `simple-pay@1.0`, and print the runtime IDs needed for testing.
+- `scripts/ao-payment-bridge.mjs`: command-line bridge that calls the local
+  `~ao-payment@1.0` device. It does not talk to AO services directly; the
+  HyperBEAM device performs the verification and local ledger import.
+- `scripts/e2e-buy-process-execution.sh`: real end-to-end buyer flow. It sends
+  a tiny AO transfer, waits for the scheduled slot, imports the verified payment
+  into Bulbasaur, and spends that balance on a real process compute request.
+- `scripts/spend-imported-balance.erl`: sends the signed paid compute request
+  used after a payment has been imported into the local ledger.
+- `src/bulbasaur_e2e.erl`, `scripts/e2e-bulbasaur.erl`, and
+  `scripts/e2e-bulbasaur.sh`: local regression test for the paid-route behavior
+  using a real `process@1.0` and local ledger credit.
+- `scripts/bulbasaur-process.lua`: minimal Lua counter process used as the real
+  process target in the E2E flow.
+- `scripts/bulbasaur-token-p4-client.lua`: helper process code for exercising
+  the token/P4 payment path.
+- `BULBASAUR.md`: operator notes for running, paying, bridging, and testing this
+  node setup.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Buyer[Buyer wallet]
+    AO[AO root token process]
+    State[AO mainnet state endpoint]
+    Bridge[ao-payment bridge CLI]
+    Device[Bulbasaur ao-payment@1.0 device]
+    Ledger[Bulbasaur local ledger process]
+    P4[p4@1.0 request hook]
+    Pay[simple-pay@1.0 pricing device]
+    Proc[Target process@1.0]
+
+    Buyer -- "Transfer 1 AO base unit\nAction=Transfer\nRecipient=ledger\nX-HB-Recipient=buyer" --> AO
+    AO -- "scheduled message +\nDebit/Credit notices" --> State
+    Bridge -- "message id, slot,\nsender, recipient, quantity" --> Device
+    Device -- "verify transfer and notices" --> State
+    Device -- "operator-signed local credit" --> Ledger
+
+    Buyer -- "signed /<process>~process@1.0/compute" --> P4
+    P4 -- "quote/check route price" --> Pay
+    Pay -- "read/debit buyer balance" --> Ledger
+    P4 -- "allow funded request" --> Proc
+    Proc -- "compute result" --> Buyer
+```
+
 Run the local payment E2E check with:
 
 ```sh
