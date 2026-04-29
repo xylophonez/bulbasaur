@@ -214,6 +214,7 @@ raw_default_message() ->
             #{<<"name">> => <<"apply@1.0">>, <<"module">> => dev_apply},
             #{<<"name">> => <<"auth-hook@1.0">>, <<"module">> => dev_auth_hook},
             #{<<"name">> => <<"ans104@1.0">>, <<"module">> => dev_codec_ans104},
+            #{<<"name">> => <<"ao-payment@1.0">>, <<"module">> => dev_ao_payment},
             #{<<"name">> => <<"b32-name@1.0">>, <<"module">> => dev_b32_name},
             #{<<"name">> => <<"blacklist@1.0">>, <<"module">> => dev_blacklist},
             #{<<"name">> => <<"bundler@1.0">>, <<"module">> => dev_bundler},
