@@ -5,42 +5,59 @@ cd "$(dirname "$0")/.."
 
 NODE_URL="${NODE_URL:-http://localhost:18734}"
 MAINNET_URL="${MAINNET_URL:-https://state.forward.computer}"
+LEGACY_MU_URL="${LEGACY_MU_URL:-https://mu.ao-testnet.xyz}"
 TOKEN="${TOKEN:-0syT13r0s0tgPmIed95bJnuSqaD29HQNN8D3ElLSrsc}"
 LEDGER="${LEDGER:-aqu6pW4GemwbDguS-rtCEBT_CJqsLYAWcmAULnZR-cE}"
 WALLET="${WALLET:?Set WALLET=/path/to/arweave-keyfile.json}"
 QUANTITY="${QUANTITY:-1}"
+PAYMENT_TIMEOUT="${PAYMENT_TIMEOUT:-120}"
 
 echo "Buying one paid process execution"
 echo "Node:    $NODE_URL"
+echo "MU:      $LEGACY_MU_URL"
 echo "Ledger:  $LEDGER"
 echo "Cost:    $QUANTITY armstrong(s)"
+echo "Timeout: ${PAYMENT_TIMEOUT}s"
 
-PAYMENT_JSON="$(
-  MAINNET_URL="$MAINNET_URL" TOKEN="$TOKEN" LEDGER="$LEDGER" \
-  WALLET="$WALLET" QUANTITY="$QUANTITY" node - <<'NODE' | tail -n 1
-const fs = require("node:fs");
-const crypto = require("node:crypto");
-const { connect, createSigner } = require("@permaweb/aoconnect");
+TRANSFER_ITEM="$(mktemp -t bulbasaur-ao-transfer.XXXXXX.ans104)"
+trap 'rm -f "$TRANSFER_ITEM"' EXIT
 
+echo "Creating signed AO transfer data item..."
+TRANSFER_LOG="$(
+  TOKEN="$TOKEN" LEDGER="$LEDGER" WALLET="$WALLET" QUANTITY="$QUANTITY" \
+  SUBMIT=false OUT="$TRANSFER_ITEM" \
+  rebar3 shell --apps hackney \
+    --eval 'file:script("scripts/submit-ao-transfer-direct.erl"), init:stop().'
+)"
+printf '%s\n' "$TRANSFER_LOG"
+
+MESSAGE_ID="$(printf '%s\n' "$TRANSFER_LOG" | awk '/^Message: / { print $2; exit }')"
+SENDER="$(printf '%s\n' "$TRANSFER_LOG" | awk '/^Sender: / { print $2; exit }')"
+if [[ -z "$MESSAGE_ID" || -z "$SENDER" || ! -s "$TRANSFER_ITEM" ]]; then
+  echo "Could not create signed AO transfer data item" >&2
+  exit 1
+fi
+
+echo "Submitting AO transfer to legacy MU..."
+MU_RESPONSE="$(
+  curl -fsS --max-time "$PAYMENT_TIMEOUT" -X POST "$LEGACY_MU_URL" \
+    -H 'content-type: application/octet-stream' \
+    -H 'accept: application/json' \
+    --data-binary "@$TRANSFER_ITEM"
+)"
+echo "MU response: $MU_RESPONSE"
+MU_ID="$(node -e 'try { console.log(JSON.parse(process.argv[1]).id || "") } catch (_) {}' "$MU_RESPONSE")"
+if [[ -n "$MU_ID" && "$MU_ID" != "$MESSAGE_ID" ]]; then
+  echo "MU returned id $MU_ID, expected $MESSAGE_ID" >&2
+  exit 1
+fi
+
+echo "Waiting for AO assignment slot..."
+SLOT="$(
+  MAINNET_URL="$MAINNET_URL" TOKEN="$TOKEN" MESSAGE_ID="$MESSAGE_ID" node - <<'NODE'
 const MAINNET_URL = process.env.MAINNET_URL;
 const TOKEN = process.env.TOKEN;
-const LEDGER = process.env.LEDGER;
-const WALLET = process.env.WALLET;
-const QUANTITY = process.env.QUANTITY;
-
-const walletBytes = fs.readFileSync(WALLET);
-const wallet = JSON.parse(walletBytes);
-
-function fromBase64Url(s) {
-  s = s.replace(/-/g, "+").replace(/_/g, "/");
-  while (s.length % 4) s += "=";
-  return Buffer.from(s, "base64");
-}
-
-const sender = crypto
-  .createHash("sha256")
-  .update(fromBase64Url(wallet.n))
-  .digest("base64url");
+const MESSAGE_ID = process.env.MESSAGE_ID;
 
 async function currentSlot() {
   const res = await fetch(`${MAINNET_URL}/${TOKEN}~process@1.0/slot/current`);
@@ -55,59 +72,35 @@ function tag(tags, name) {
   return tags?.find((t) => t.name === name)?.value;
 }
 
-async function findScheduledSlot(messageId, fromSlot) {
+async function main() {
+  const fromSlot = Math.max(0, (await currentSlot()) - 2);
   for (let attempt = 0; attempt < 36; attempt++) {
     const toSlot = (await currentSlot()) + 10;
     const url =
       `${MAINNET_URL}/${TOKEN}~process@1.0/schedule` +
       `?from=${fromSlot}&to=${toSlot}&accept=application/aos-2`;
-
     const res = await fetch(url);
     if (!res.ok) throw new Error(`schedule failed: ${res.status}`);
     const schedule = await res.json();
-
     for (const edge of schedule.edges || []) {
-      const msg = edge.node?.message;
-      const assignment = edge.node?.assignment;
-      if (msg?.Id === messageId) {
-        return tag(assignment?.Tags, "Nonce");
+      if (edge.node?.message?.Id === MESSAGE_ID) {
+        const nonce = tag(edge.node.assignment?.Tags, "Nonce");
+        if (!nonce) throw new Error(`assignment missing Nonce for ${MESSAGE_ID}`);
+        console.log(nonce);
+        return;
       }
     }
-
     await new Promise((resolve) => setTimeout(resolve, 5000));
   }
-  throw new Error(`message did not appear in AO schedule: ${messageId}`);
+  throw new Error(`message did not appear in AO schedule: ${MESSAGE_ID}`);
 }
 
-const signer = createSigner(walletBytes);
-const ao = connect({ MODE: "mainnet", URL: MAINNET_URL, signer });
-
-const fromSlot = Math.max(0, (await currentSlot()) - 2);
-const sent = await ao.message({
-  process: TOKEN,
-  signer,
-  tags: [
-    { name: "Action", value: "Transfer" },
-    { name: "Recipient", value: LEDGER },
-    { name: "Quantity", value: QUANTITY },
-    { name: "X-HB-Recipient", value: sender },
-  ],
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
 });
-
-const messageId =
-  typeof sent === "string" ? sent : sent.messageId || sent.id || sent.Id;
-if (!messageId) {
-  throw new Error(`could not find message id in ${JSON.stringify(sent)}`);
-}
-
-const slot = await findScheduledSlot(messageId, fromSlot);
-console.log(JSON.stringify({ messageId, slot, sender }));
 NODE
 )"
-
-MESSAGE_ID="$(node -e 'console.log(JSON.parse(process.argv[1]).messageId)' "$PAYMENT_JSON")"
-SLOT="$(node -e 'console.log(JSON.parse(process.argv[1]).slot)' "$PAYMENT_JSON")"
-SENDER="$(node -e 'console.log(JSON.parse(process.argv[1]).sender)' "$PAYMENT_JSON")"
 
 echo "AO transfer message: $MESSAGE_ID"
 echo "AO assignment slot:  $SLOT"
