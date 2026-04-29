@@ -56,27 +56,27 @@ This branch adds the following Bulbasaur-specific pieces:
 
 ```mermaid
 flowchart LR
-    Buyer[Buyer wallet]
-    AO[AO root token process]
-    State[AO mainnet state endpoint]
-    Bridge[ao-payment bridge CLI]
-    Device[Bulbasaur ao-payment@1.0 device]
-    Ledger[Bulbasaur local ledger process]
-    P4[p4@1.0 request hook]
-    Pay[simple-pay@1.0 pricing device]
-    Proc[Target process@1.0]
+    Buyer["Buyer wallet"]
+    AO["AO root token process"]
+    State["AO mainnet state endpoint"]
+    Bridge["ao-payment bridge CLI"]
+    Device["Bulbasaur ao-payment@1.0 device"]
+    Ledger["Bulbasaur local ledger process"]
+    P4["p4@1.0 request hook"]
+    Pay["simple-pay@1.0 pricing device"]
+    Proc["Target process@1.0"]
 
-    Buyer -- "Transfer 1 AO base unit\nAction=Transfer\nRecipient=ledger\nX-HB-Recipient=buyer" --> AO
-    AO -- "scheduled message +\nDebit/Credit notices" --> State
-    Bridge -- "message id, slot,\nsender, recipient, quantity" --> Device
-    Device -- "verify transfer and notices" --> State
-    Device -- "operator-signed local credit" --> Ledger
+    Buyer -->|"Transfer 1 AO base unit<br/>Action=Transfer<br/>Recipient=ledger<br/>X-HB-Recipient=buyer"| AO
+    AO -->|"scheduled message +<br/>Debit/Credit notices"| State
+    Bridge -->|"message id, slot,<br/>sender, recipient, quantity"| Device
+    Device -->|"verify transfer and notices"| State
+    Device -->|"operator-signed local credit"| Ledger
 
-    Buyer -- "signed /<process>~process@1.0/compute" --> P4
-    P4 -- "quote/check route price" --> Pay
-    Pay -- "read/debit buyer balance" --> Ledger
-    P4 -- "allow funded request" --> Proc
-    Proc -- "compute result" --> Buyer
+    Buyer -->|"signed process compute request"| P4
+    P4 -->|"quote/check route price"| Pay
+    Pay -->|"read/debit buyer balance"| Ledger
+    P4 -->|"allow funded request"| Proc
+    Proc -->|"compute result"| Buyer
 ```
 
 Run the local payment E2E check with:
