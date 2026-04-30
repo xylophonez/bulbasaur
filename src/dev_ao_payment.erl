@@ -334,4 +334,91 @@ verify_result_requires_debit_and_credit_test() ->
         {error, #{ <<"status">> := 402 }},
         verify_result(#{<<"raw">> => #{<<"Messages">> => [Credit]}}, Expected, #{})
     ).
+
+verify_rejects_missing_required_fields_test() ->
+    ?assertMatch(
+        {error, #{ <<"status">> := 400 }},
+        verify(#{}, #{ <<"message-id">> => <<"message-id">> }, #{})
+    ).
+
+verify_schedule_matches_expected_transfer_test() ->
+    Schedule = #{
+        <<"edges">> => [
+            #{
+                <<"node">> => #{
+                    <<"message">> => #{
+                        <<"Id">> => <<"message-id">>,
+                        <<"Tags">> => [
+                            tag(<<"Action">>, <<"Transfer">>),
+                            tag(<<"Recipient">>, <<"ledger">>),
+                            tag(<<"Quantity">>, <<"1">>)
+                        ]
+                    },
+                    <<"assignment">> => #{
+                        <<"Tags">> => [tag(<<"Nonce">>, <<"7">>)]
+                    }
+                }
+            }
+        ]
+    },
+    Expected = #{
+        <<"message-id">> => <<"message-id">>,
+        <<"ledger">> => <<"ledger">>,
+        <<"quantity">> => <<"1">>,
+        <<"slot">> => <<"7">>
+    },
+    ?assertEqual(ok, verify_schedule(Schedule, Expected, #{})),
+    ?assertMatch(
+        {error, #{ <<"status">> := 402 }},
+        verify_schedule(
+            Schedule,
+            Expected#{ <<"quantity">> => <<"2">> },
+            #{}
+        )
+    ).
+
+credit_to_payment_uses_sender_without_forwarded_recipient_test() ->
+    Expected = payment_expected(undefined),
+    Credit = credit_notice([]),
+    ?assertMatch(
+        {ok, #{ <<"recipient">> := <<"sender">> }},
+        credit_to_payment(Credit, Expected, #{})
+    ).
+
+credit_to_payment_respects_forwarded_recipient_test() ->
+    Expected = payment_expected(<<"local-recipient">>),
+    Credit = credit_notice([tag(<<"X-HB-Recipient">>, <<"local-recipient">>)]),
+    ?assertMatch(
+        {ok, #{ <<"recipient">> := <<"local-recipient">> }},
+        credit_to_payment(Credit, Expected, #{})
+    ).
+
+credit_to_payment_rejects_requested_recipient_mismatch_test() ->
+    Expected = payment_expected(<<"local-recipient">>),
+    Credit = credit_notice([tag(<<"X-HB-Recipient">>, <<"other-recipient">>)]),
+    ?assertMatch(
+        {error, #{ <<"status">> := 400 }},
+        credit_to_payment(Credit, Expected, #{})
+    ).
+
+payment_expected(RequestedRecipient) ->
+    #{
+        <<"token">> => <<"ao-token">>,
+        <<"message-id">> => <<"message-id">>,
+        <<"ledger">> => <<"ledger">>,
+        <<"sender">> => <<"sender">>,
+        <<"quantity">> => <<"1">>,
+        <<"requested-recipient">> => RequestedRecipient
+    }.
+
+credit_notice(ExtraTags) ->
+    #{
+        <<"Tags">> => [
+            tag(<<"Reference">>, <<"notice-reference">>)
+            | ExtraTags
+        ]
+    }.
+
+tag(Name, Value) ->
+    #{ <<"name">> => Name, <<"value">> => Value }.
 -endif.
