@@ -28,7 +28,6 @@ LedgerProcPath =
         RawLedgerProcPath -> list_to_binary(RawLedgerProcPath)
     end.
 
-{ok, ClientScript} = file:read_file("scripts/bulbasaur-token-p4-client.lua").
 {ok, TokenScript} = file:read_file("scripts/hyper-token.lua").
 {ok, ProcessScript} = file:read_file("scripts/hyper-token-p4.lua").
 
@@ -93,14 +92,9 @@ LedgerPath = <<"/", LedgerProcessID/binary, "~process@1.0">>.
 Processor =
     #{
         <<"device">> => <<"p4@1.0">>,
-        <<"ledger-device">> => <<"lua@5.3a">>,
+        <<"ledger-device">> => <<"process-ledger@1.0">>,
         <<"pricing-device">> => <<"simple-pay@1.0">>,
-        <<"ledger-path">> => LedgerPath,
-        <<"module">> => #{
-            <<"content-type">> => <<"text/x-lua">>,
-            <<"name">> => <<"scripts/bulbasaur-token-p4-client.lua">>,
-            <<"body">> => ClientScript
-        }
+        <<"ledger-path">> => LedgerPath
     }.
 
 Opts =

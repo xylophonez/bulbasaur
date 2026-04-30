@@ -7,9 +7,15 @@ run() ->
     Port = env_int("HB_PORT", 18901),
     AOToken = env_bin("BULBASAUR_AO_TOKEN", <<"0syT13r0s0tgPmIed95bJnuSqaD29HQNN8D3ElLSrsc">>),
     StoreName = list_to_binary(io_lib:format("cache-bulbasaur-e2e-~p", [Port])),
+    Store = #{
+        <<"store-module">> => hb_store_fs,
+        <<"name">> => StoreName
+    },
     HostWallet = hb:wallet(<<"bulbasaur-wallet.json">>),
     Operator = hb:address(HostWallet),
     LedgerCommitOpts = #{
+        store => Store,
+        <<"store">> => Store,
         priv_wallet => HostWallet,
         <<"priv-wallet">> => HostWallet
     },
@@ -18,22 +24,8 @@ run() ->
     FundedAddress = hb_util:human_id(ar_wallet:to_address(FundedWallet)),
     SchedulerLocation = hb_util:human_id(ar_wallet:to_address(HostWallet)),
     {ok, LuaModule} = file:read_file("scripts/bulbasaur-process.lua"),
-    {ok, ClientScript} = file:read_file("scripts/bulbasaur-token-p4-client.lua"),
     {ok, TokenScript} = file:read_file("scripts/hyper-token.lua"),
     {ok, ProcessScript} = file:read_file("scripts/hyper-token-p4.lua"),
-
-    Processor =
-        #{
-            <<"device">> => <<"p4@1.0">>,
-            <<"ledger-device">> => <<"lua@5.3a">>,
-            <<"pricing-device">> => <<"simple-pay@1.0">>,
-            <<"ledger-path">> => <<"/ledger~node-process@1.0">>,
-            <<"module">> => #{
-                <<"content-type">> => <<"text/x-lua">>,
-                <<"name">> => <<"scripts/bulbasaur-token-p4-client.lua">>,
-                <<"body">> => ClientScript
-            }
-        },
 
     LedgerBaseDef =
         #{
@@ -66,6 +58,14 @@ run() ->
         ),
     LedgerProcessID =
         hb_util:human_id(hb_message:id(LedgerProc, signed, LedgerCommitOpts)),
+    LedgerPath = <<"/", LedgerProcessID/binary, "~process@1.0">>,
+    Processor =
+        #{
+            <<"device">> => <<"p4@1.0">>,
+            <<"ledger-device">> => <<"process-ledger@1.0">>,
+            <<"pricing-device">> => <<"simple-pay@1.0">>,
+            <<"ledger-path">> => LedgerPath
+        },
 
     Opts =
         #{
@@ -80,21 +80,17 @@ run() ->
             <<"p4-recipient">> => Operator,
             simple_pay_price => 0,
             <<"simple-pay-price">> => 0,
-            store => #{
-                <<"store-module">> => hb_store_fs,
-                <<"name">> => StoreName
-            },
-            <<"store">> => #{
-                <<"store-module">> => hb_store_fs,
-                <<"name">> => StoreName
-            },
+            store => Store,
+            <<"store">> => Store,
             p4_non_chargable_routes => [
                 #{ <<"template">> => <<"/*~node-process@1.0/*">> },
+                #{ <<"template">> => << LedgerPath/binary, "/*" >> },
                 #{ <<"template">> => <<"/~p4@1.0/balance">> },
                 #{ <<"template">> => <<"/~meta@1.0/*">> }
             ],
             <<"p4-non-chargable-routes">> => [
                 #{ <<"template">> => <<"/*~node-process@1.0/*">> },
+                #{ <<"template">> => << LedgerPath/binary, "/*" >> },
                 #{ <<"template">> => <<"/~p4@1.0/balance">> },
                 #{ <<"template">> => <<"/~meta@1.0/*">> }
             ],
@@ -126,6 +122,7 @@ run() ->
                 <<"response">> => Processor
             }
         },
+    {ok, _LedgerCacheID} = hb_cache:write(LedgerProc, Opts),
 
     Node = hb_http_server:start_node(Opts),
 
@@ -170,7 +167,7 @@ run() ->
         OtherNoBalance -> error({expected_402_without_balance, OtherNoBalance})
     end,
 
-    BalancePath = <<"/ledger~node-process@1.0/now/balance/", FundedAddress/binary>>,
+    BalancePath = <<LedgerPath/binary, "/now/balance/", FundedAddress/binary>>,
     {ok, 100} = hb_http:get(Node, BalancePath, Opts),
 
     FundedCompute = compute_request(ProcID, FundedWallet),

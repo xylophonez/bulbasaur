@@ -2,7 +2,7 @@
 
 This checkout is configured to run a paid process-execution node using
 `p4@1.0` as the request/response hook, `simple-pay@1.0` as the pricing device,
-and a local AO-token sub-ledger as the payment ledger.
+and `process-ledger@1.0` as the adapter to a local AO-token sub-ledger.
 
 Start it with:
 
@@ -29,8 +29,12 @@ This branch adds the following Bulbasaur-specific pieces:
   endpoint, requires both `Debit-Notice` and `Credit-Notice`, prevents duplicate
   imports, and then posts an operator-signed local credit into the Bulbasaur
   ledger.
+- `src/dev_process_ledger.erl`: HyperBEAM device registered as
+  `process-ledger@1.0`. It lets `p4@1.0` read balances from the local ledger
+  process and push operator-signed charge messages back into it.
 - `src/hb_opts.erl`: preloads `ao-payment@1.0` so the verifier device is
-  available through the normal HyperBEAM device map.
+  available through the normal HyperBEAM device map, and preloads
+  `process-ledger@1.0` for the p4 ledger adapter.
 - `scripts/start-bulbasaur.erl` and `scripts/start-bulbasaur.sh`: start the
   paid node, create/load the local ledger process, wire `p4@1.0` and
   `simple-pay@1.0`, and print the runtime IDs needed for testing.
@@ -47,8 +51,6 @@ This branch adds the following Bulbasaur-specific pieces:
   using a real `process@1.0` and local ledger credit.
 - `scripts/bulbasaur-process.lua`: minimal Lua counter process used as the real
   process target in the E2E flow.
-- `scripts/bulbasaur-token-p4-client.lua`: helper process code for exercising
-  the token/P4 payment path.
 - `BULBASAUR.md`: operator notes for running, paying, bridging, and testing this
   node setup.
 
@@ -64,6 +66,7 @@ flowchart LR
     Ledger["Bulbasaur local ledger process"]
     P4["p4@1.0 request hook"]
     Pay["simple-pay@1.0 pricing device"]
+    PL["process-ledger@1.0 adapter"]
     Proc["Target process@1.0"]
 
     Buyer -->|"Transfer 1 AO base unit<br/>Action=Transfer<br/>Recipient=ledger<br/>X-HB-Recipient=buyer"| AO
@@ -74,7 +77,8 @@ flowchart LR
 
     Buyer -->|"signed process compute request"| P4
     P4 -->|"quote/check route price"| Pay
-    Pay -->|"read/debit buyer balance"| Ledger
+    P4 -->|"check balance / charge"| PL
+    PL -->|"read balance / push charge"| Ledger
     P4 -->|"allow funded request"| Proc
     Proc -->|"compute result"| Buyer
 ```
@@ -104,7 +108,7 @@ Defaults:
 
 The important token selector is not a knob on `p4@1.0`. It is the ledger
 process definition's `token` field. In this checkout, `BULBASAUR_AO_TOKEN`
-feeds that field on the local `ledger~node-process@1.0` sub-ledger.
+feeds that field on the local ledger process.
 
 ## Paying for Compute with AO
 
@@ -203,5 +207,5 @@ root token with:
 ```
 
 If the transfer succeeds, Bulbasaur should then report that balance at
-`GET /ledger~node-process@1.0/now/balance/YOUR_WALLET_ADDRESS`, and each paid
+`GET /<ledger-id>~process@1.0/now/balance/YOUR_WALLET_ADDRESS`, and each paid
 compute should debit it by `BULBASAUR_PROCESS_PRICE` AO base units.
