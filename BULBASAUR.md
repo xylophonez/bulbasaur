@@ -34,10 +34,10 @@ This branch adds the following Bulbasaur-specific pieces:
   `process-ledger@1.0`. It lets `p4@1.0` read balances from the local ledger
   process and push operator-signed charge, reserve, release, and refund
   messages back into it.
-- `src/dev_bundler_escrow.erl`: bundler escrow helper. It quotes uploads with
-  `metering@1.0`, reserves uploader funds before the item is cached/queued,
-  releases funds to the operator after `bundle_complete`, and refunds if the
-  pre-bundle cache step fails after a reservation.
+- `src/dev_bundler_escrow.erl`: bundler escrow helper. It is not a public
+  AO-Core device exposed as `~bundler-escrow@1.0`; it is the bundler-side glue
+  that calls `metering@1.0` for a byte quote and `process-ledger@1.0` for the
+  reserve, release, and refund ledger actions.
 - `src/dev_bundler.erl`, `src/dev_bundler_cache.erl`, and
   `src/dev_bundler_recovery.erl`: extend Sam's metered bundler flow with
   reservation metadata, cache/recovery support, and completion-time release.
@@ -132,14 +132,64 @@ Defaults:
 Bundler payment flow:
 
 1. The uploader submits a signed ANS-104 data item to `/~bundler@1.0/tx`.
-2. The bundler calculates the bundled byte size and asks `metering@1.0` for a
-   quote.
-3. `process-ledger@1.0` reserves the quoted AO base units from the uploader in
-   the local ledger process before the item is cached or queued.
-4. After the bundle tx is posted and chunks/proofs are seeded,
-   `bundle_complete` releases the reservation to the operator.
-5. If the reservation succeeds but pre-queue cache writing fails, the bundler
-   attempts to refund the reservation.
+2. `dev_bundler_escrow` calculates the bundled byte size and asks
+   `metering@1.0` for a quote using the configured AO base-units-per-byte rate.
+3. `dev_bundler_escrow` calls `process-ledger@1.0` to reserve the quoted AO
+   base units from the uploader in the local ledger process. The item is not
+   cached or queued unless the reserve succeeds.
+4. The reserved amount stays locked in the ledger process while the bundler
+   caches the item, queues it, builds the bundle, posts the bundle transaction,
+   and seeds the bundle data/proofs.
+5. After the bundle tx is posted and chunks/proofs are seeded, `bundle_complete`
+   calls back through `dev_bundler_escrow`, which releases the reservation to
+   the operator through `process-ledger@1.0`.
+6. If the reservation succeeds but the pre-queue cache write fails, the bundler
+   attempts to refund the reservation before returning the error.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Uploader wallet
+    participant B as bundler@1.0
+    participant E as dev_bundler_escrow
+    participant M as metering@1.0
+    participant PL as process-ledger@1.0
+    participant L as Local AO-token ledger process
+    participant AR as Arweave gateway
+    participant OP as Operator wallet
+
+    U->>B: POST signed ANS-104 item to /~bundler@1.0/tx
+    B->>E: reserve(Item, Uploader)
+    E->>M: quote(arweave-bytes, bundled item size)
+    M-->>E: AO base-unit price
+    E->>PL: reserve(Uploader, Operator, Price, EscrowID)
+    PL->>L: operator-signed reserve message
+    L-->>PL: reserved or insufficient funds
+    PL-->>E: reserve result
+
+    alt reserve accepted
+        E-->>B: escrow metadata
+        B->>B: cache item and enqueue with escrow metadata
+        B->>AR: post bundle transaction
+        B->>AR: seed chunks and proofs
+        AR-->>B: posted and seeded
+        B->>E: release on bundle_complete
+        E->>PL: release(EscrowID)
+        PL->>L: operator-signed release message
+        L-->>OP: reserved AO becomes operator balance
+        B-->>U: upload accepted with item/bundle metadata
+    else reserve rejected
+        E-->>B: payment error
+        B-->>U: 402 / insufficient balance
+    end
+
+    opt cache fails after reserve
+        B->>E: refund(EscrowID)
+        E->>PL: refund(EscrowID)
+        PL->>L: operator-signed refund message
+        L-->>U: reserved AO returns to uploader balance
+    end
+```
 
 `bundle_complete` is the bundler's "posted and seeded" signal. It is not an
 Arweave finality confirmation, but it is the point at which the operator has
