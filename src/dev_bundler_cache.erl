@@ -373,20 +373,22 @@ bundler_optimistic_cache_test() ->
         <<"store">> => hb_test_utils:test_store(hb_store_lmdb)
     }),
     try
+        ClientOpts = #{ <<"store">> => hb_test_utils:test_store() },
         StructuredBundle = hb_message:convert(
             L2Bundle,
             <<"structured@1.0">>,
             <<"ans104@1.0">>,
-            #{}
+            ClientOpts
         ),
+        LoadedBundle = hb_cache:ensure_all_loaded(StructuredBundle, ClientOpts),
         ?assertMatch({ok, _}, hb_http:post(
             Node,
             #{
                 <<"path">> => <<"/~bundler@1.0/tx">>,
                 <<"bundler-subject">> => <<"body">>,
-                <<"body">> => StructuredBundle
+                <<"body">> => LoadedBundle
             },
-            #{}
+            ClientOpts
         )),
         % Every item at every nesting level must be independently readable
         % via a bare GET /ID — the real user-facing access pattern.
@@ -400,11 +402,12 @@ bundler_optimistic_cache_test() ->
         lists:foreach(
             fun({Label, ExpectedID}) ->
                 {ok, Msg} = hb_http:get(
-                    Node, #{ <<"path">> => <<"/", ExpectedID/binary>> }, #{}),
+                    Node, #{ <<"path">> => <<"/", ExpectedID/binary>> }, ClientOpts),
+                LoadedMsg = hb_cache:ensure_all_loaded(Msg, ClientOpts),
                 ?event(debug_test, {item_result,
                     {label, Label}, {expected_id, ExpectedID}, {msg, Msg}}),
-                ?assert(hb_message:verify(Msg)),
-                ?assertEqual(ExpectedID, hb_message:id(Msg, signed))
+                ?assert(hb_message:verify(LoadedMsg, all, ClientOpts)),
+                ?assertEqual(ExpectedID, hb_message:id(LoadedMsg, signed, ClientOpts))
             end,
             AllItems
         ),

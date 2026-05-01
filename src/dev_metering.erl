@@ -14,7 +14,7 @@
 %%% `metering-rates' in the node message as a map of resource name to AO token
 %%% units per resource unit.
 -module(dev_metering).
--export([info/1, estimate/3, price/3, is_active/0, consume/3]).
+-export([info/1, estimate/3, price/3, quote/3, is_active/0, consume/3]).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -27,12 +27,13 @@ info(_) ->
         exports =>
             [
                 <<"estimate">>,
-                <<"price">>
+                <<"price">>,
+                <<"quote">>
             ]
     }.
 
 %% @doc Start a metering session for the request.
-estimate(_Base, _EstimateReq, _Opts) ->
+estimate(_Base, EstimateReq, Opts) ->
     {reductions, Reductions} = erlang:process_info(self(), reductions),
     erlang:put(
         ?METERING_KEY,
@@ -41,7 +42,7 @@ estimate(_Base, _EstimateReq, _Opts) ->
             meters => #{}
         }
     ),
-    {ok, 0}.
+    {ok, estimate_request(EstimateReq, Opts)}.
 
 %% @doc Close the metering session and calculate the final AO token price.
 price(_Base, _PriceReq, Opts) ->
@@ -61,6 +62,12 @@ price(_Base, _PriceReq, Opts) ->
         ),
     erlang:erase(?METERING_KEY),
     {ok, Price}.
+
+%% @doc Price a single resource amount without opening a metering session.
+quote(_Base, Req, Opts) ->
+    Resource = hb_ao:normalize_key(hb_maps:get(<<"resource">>, Req, <<>>, Opts)),
+    Amount = hb_util:int(hb_maps:get(<<"amount">>, Req, 0, Opts)),
+    {ok, resource_price(Resource, Amount, Opts)}.
 
 %% @doc Return whether the current process has an active metering session.
 is_active() ->
@@ -109,6 +116,49 @@ add_meter(Resource, Amount, State) ->
                 Resource => maps:get(Resource, Meters, 0) + Amount
             }
     }.
+
+estimate_request(EstimateReq, Opts) ->
+    Req =
+        hb_ao:get(
+            <<"request">>,
+            EstimateReq,
+            undefined,
+            Opts#{ <<"hashpath">> => ignore }
+        ),
+    case is_bundler_upload(Req, Opts) of
+        true ->
+            Item = bundler_subject(Req, Opts),
+            resource_price(<<"arweave-bytes">>, bundled_item_size(Item, Opts), Opts);
+        false ->
+            0
+    end.
+
+is_bundler_upload(Req, Opts) when is_map(Req) ->
+    Path = hb_maps:get(<<"path">>, Req, <<>>, Opts),
+    Path =:= <<"/~bundler@1.0/tx">> orelse Path =:= <<"~bundler@1.0/tx">>;
+is_bundler_upload(_, _) ->
+    false.
+
+bundler_subject(Req, Opts) ->
+    case hb_maps:find(<<"bundler-subject">>, Req, Opts) of
+        {ok, SubjectKey} -> hb_maps:get(SubjectKey, Req, Req, Opts);
+        error -> Req
+    end.
+
+bundled_item_size(Item, Opts) ->
+    TX =
+        hb_message:convert(
+            Item,
+            #{ <<"device">> => <<"ans104@1.0">>, <<"bundle">> => true },
+            <<"structured@1.0">>,
+            Opts
+        ),
+    byte_size(ar_bundles:serialize(TX)).
+
+resource_price(Resource, Amount, Opts) ->
+    Rates = hb_opts:get(<<"metering-rates">>, #{}, Opts),
+    Rate = hb_util:int(hb_maps:get(Resource, Rates, 0, Opts)),
+    Amount * Rate.
 
 %%% Tests
 

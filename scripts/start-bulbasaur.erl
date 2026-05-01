@@ -4,6 +4,18 @@ Price =
         RawPrice -> list_to_integer(RawPrice)
     end.
 
+BundlerBytePrice =
+    case os:getenv("BULBASAUR_BUNDLER_BYTE_PRICE") of
+        false -> 1162726;
+        RawBundlerBytePrice -> list_to_integer(RawBundlerBytePrice)
+    end.
+
+BundlerMaxItems =
+    case os:getenv("BULBASAUR_BUNDLER_MAX_ITEMS") of
+        false -> 1000;
+        RawBundlerMaxItems -> list_to_integer(RawBundlerMaxItems)
+    end.
+
 Port =
     case os:getenv("HB_PORT") of
         false -> 8734;
@@ -33,6 +45,11 @@ LedgerProcPath =
 
 Wallet = hb:wallet(WalletPath).
 Operator = hb:address(Wallet).
+Beneficiary =
+    case os:getenv("BULBASAUR_BENEFICIARY") of
+        false -> Operator;
+        RawBeneficiary -> list_to_binary(RawBeneficiary)
+    end.
 LedgerCommitOpts = #{
     priv_wallet => Wallet,
     <<"priv-wallet">> => Wallet
@@ -93,8 +110,26 @@ Processor =
     #{
         <<"device">> => <<"p4@1.0">>,
         <<"ledger-device">> => <<"process-ledger@1.0">>,
-        <<"pricing-device">> => <<"simple-pay@1.0">>,
-        <<"ledger-path">> => LedgerPath
+        <<"pricing-device">> => <<"pricing-router@1.0">>,
+        <<"default-pricing-device">> => <<"simple-pay@1.0">>,
+        <<"ledger-path">> => LedgerPath,
+        <<"pricing-routes">> => [
+            #{
+                <<"template">> => <<"/~bundler@1.0/tx">>,
+                <<"pricing-device">> => <<"metering@1.0">>
+            }
+        ]
+    }.
+
+BundlerSettlement =
+    #{
+        <<"device">> => <<"bundler-settlement@1.0">>,
+        <<"ledger-device">> => <<"process-ledger@1.0">>,
+        <<"pricing-device">> => <<"metering@1.0">>,
+        <<"ledger-path">> => LedgerPath,
+        <<"settlement-account">> => Operator,
+        <<"beneficiary">> => Beneficiary,
+        <<"hook">> => #{ <<"result">> => <<"ignore">> }
     }.
 
 Opts =
@@ -109,8 +144,15 @@ Opts =
         p4_recipient => Operator,
         <<"operator">> => Operator,
         <<"p4-recipient">> => Operator,
+        bundler_beneficiary => Beneficiary,
+        <<"bundler-beneficiary">> => Beneficiary,
+        <<"bundler-max-items">> => BundlerMaxItems,
         simple_pay_price => 0,
         <<"simple-pay-price">> => 0,
+        <<"metering-rates">> => #{
+            <<"arweave-bytes">> => BundlerBytePrice,
+            <<"beam-reductions">> => 0
+        },
         p4_non_chargable_routes => [
             #{ <<"template">> => <<"/*~node-process@1.0/*">> },
             #{ <<"template">> => << LedgerPath/binary, "/*" >> },
@@ -129,6 +171,8 @@ Opts =
         <<"ao-payment-token">> => AOToken,
         ao_payment_ledger => LedgerProcessID,
         <<"ao-payment-ledger">> => LedgerProcessID,
+        ao_payment_deposit_address => Operator,
+        <<"ao-payment-deposit-address">> => Operator,
         ao_payment_node => <<"http://localhost:", (integer_to_binary(Port))/binary>>,
         <<"ao-payment-node">> => <<"http://localhost:", (integer_to_binary(Port))/binary>>,
         ao_payment_mainnet_url => <<"https://state.forward.computer">>,
@@ -138,6 +182,10 @@ Opts =
                 #{
                     <<"template">> => <<"/.*~process@1.0/.*">>,
                     <<"price">> => Price
+                },
+                #{
+                    <<"template">> => <<"/~bundler@1.0/tx">>,
+                    <<"price">> => 0
                 }
             ]
         },
@@ -146,6 +194,10 @@ Opts =
                 #{
                     <<"template">> => <<"/.*~process@1.0/.*">>,
                     <<"price">> => Price
+                },
+                #{
+                    <<"template">> => <<"/~bundler@1.0/tx">>,
+                    <<"price">> => 0
                 }
             ]
         },
@@ -160,11 +212,13 @@ Opts =
         },
         on => #{
             <<"request">> => Processor,
-            <<"response">> => Processor
+            <<"response">> => Processor,
+            <<"bundled-message-complete">> => BundlerSettlement
         },
         <<"on">> => #{
             <<"request">> => Processor,
-            <<"response">> => Processor
+            <<"response">> => Processor,
+            <<"bundled-message-complete">> => BundlerSettlement
         }
     }.
 
@@ -174,21 +228,25 @@ Node = hb_http_server:start_node(Opts).
 io:format(
     "~nBulbasaur paid-process node started at ~s~n"
     "Operator: ~s~n"
+    "Bundler beneficiary: ~s~n"
     "Wallet: ~s~n"
     "Process route price: ~p AO base unit(s)~n"
+    "Bundler byte price: ~p AO base unit(s)~n"
     "AO root token: ~s~n"
     "Ledger process file: ~s~n"
-    "Ledger AO funding account: ~s~n"
+    "AO deposit address: ~s~n"
     "Ledger route: ~s~n"
     "Ledger local cache ID: ~s~n~n",
     [
         Node,
         Operator,
+        Beneficiary,
         WalletPath,
         Price,
+        BundlerBytePrice,
         AOToken,
         LedgerProcPath,
-        LedgerProcessID,
+        Operator,
         LedgerPath,
         LedgerCachePath
     ]

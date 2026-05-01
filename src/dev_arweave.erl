@@ -1396,6 +1396,7 @@ get_tx_basic_data_test_parallel() ->
 
 %% @doc The data for this transaction ends with two smaller chunks.
 get_tx_split_chunk_test_parallel() ->
+    Opts = #{ <<"store">> => hb_test_utils:test_store() },
     {ok, Structured} = hb_ao:resolve(
         #{ <<"device">> => <<"arweave@2.9">> },
         #{
@@ -1403,12 +1404,13 @@ get_tx_split_chunk_test_parallel() ->
             <<"tx">> => <<"T2pluNnaavL7-S2GkO_m3pASLUqMH_XQ9IiIhZKfySs">>,
             <<"exclude-data">> => false
         },
-        #{}
+        Opts
     ),
-    ?assert(hb_message:verify(Structured, all, #{})),
+    Loaded = hb_cache:ensure_all_loaded(Structured, Opts),
+    ?assert(hb_message:verify(Loaded, all, Opts)),
     ?assertEqual(
         <<"T2pluNnaavL7-S2GkO_m3pASLUqMH_XQ9IiIhZKfySs">>,
-        hb_message:id(Structured, signed)),
+        hb_message:id(Loaded, signed)),
     ExpectedMsg = #{
         <<"reward">> => <<"6035386935">>,
         <<"anchor">> => <<"PX16-598IrIMvLxFkvfNTWLVKXqXSmArOdW3o7X8jWMCH1fiNOjBZ2XjQlw0FOme">>,
@@ -1637,22 +1639,25 @@ get_raw_range_ans104_test_parallel() ->
     ).
 
 get_tx_rsa_nested_bundle_test_parallel() ->
-    Node = hb_http_server:start_node(),
+    Opts = #{ <<"store">> => hb_test_utils:test_store() },
+    Node = hb_http_server:start_node(Opts),
     Path = <<"/~arweave@2.9/tx=bndIwac23-s0K11TLC1N7z472sLGAkiOdhds87ZywoE">>,
-    {ok, Root} = hb_http:get(Node, Path, #{}),
+    {ok, Root} = hb_http:get(Node, Path, Opts),
+    LoadedRoot = hb_cache:ensure_all_loaded(Root, Opts),
     ?event(debug_test, {root, Root}),
-    ?assert(hb_message:verify(Root, all, #{})),
+    ?assert(hb_message:verify(LoadedRoot, all, Opts)),
     ChildPath = <<Path/binary, "/1/2">>,
-    {ok, Child} = hb_http:get(Node, ChildPath, #{}),
+    {ok, Child} = hb_http:get(Node, ChildPath, Opts),
+    LoadedChild = hb_cache:ensure_all_loaded(Child, Opts),
     ?event(debug_test, {child, Child}),
-    ?assert(hb_message:verify(Child, all, #{})),
+    ?assert(hb_message:verify(LoadedChild, all, Opts)),
     {ok, ExpectedChild} =
         hb_ao:resolve(
-            Root,
+            LoadedRoot,
             <<"1/2">>,
-            #{}
+            Opts
         ),
-    ?assert(hb_message:match(ExpectedChild, Child, only_present)),
+    ?assert(hb_message:match(ExpectedChild, LoadedChild, only_present)),
     ManualChild = #{
         <<"data">> => <<"{\"totalTickedRewardsDistributed\":0,\"distributedEpochIndexes\":[],\"newDemandFactors\":[],\"newEpochIndexes\":[],\"tickedRewardDistributions\":[],\"newPruneGatewaysResults\":[{\"delegateStakeReturned\":0,\"stakeSlashed\":0,\"gatewayStakeReturned\":0,\"delegateStakeWithdrawing\":0,\"prunedGateways\":[],\"slashedGateways\":[],\"gatewayStakeWithdrawing\":0}]}">>,
         <<"data-protocol">> => <<"ao">>,
@@ -1664,7 +1669,7 @@ get_tx_rsa_nested_bundle_test_parallel() ->
         <<"type">> => <<"Message">>,
         <<"variant">> => <<"ao.TN.1">>
     },
-    ?assert(hb_message:match(ManualChild, Child, only_present)),
+    ?assert(hb_message:match(ManualChild, LoadedChild, only_present)),
     ok.
 
 %% @TODO: This test is disabled because it takes too long to run. Re-enable

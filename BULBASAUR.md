@@ -1,8 +1,9 @@
 # Bulbasaur HyperBEAM Node
 
-This checkout is configured to run a paid process-execution node using
-`p4@1.0` as the request/response hook, `simple-pay@1.0` as the pricing device,
-and `process-ledger@1.0` as the adapter to a local AO-token sub-ledger.
+This checkout is configured to run paid process execution and paid bundling
+using `p4@1.0` as the request/response hook, `pricing-router@1.0` to select a
+pricing device per route, `metering@1.0` for bundled-byte pricing, and
+`process-ledger@1.0` as the adapter to a local AO-token ledger process.
 
 Start it with:
 
@@ -19,6 +20,7 @@ On startup it prints:
 - the operator address
 - the configured AO root token process ID
 - the Bulbasaur ledger process ID
+- the AO deposit address
 
 ## New Components
 
@@ -32,9 +34,17 @@ This branch adds the following Bulbasaur-specific pieces:
 - `src/dev_process_ledger.erl`: HyperBEAM device registered as
   `process-ledger@1.0`. It lets `p4@1.0` read balances from the local ledger
   process and push operator-signed charge messages back into it.
+- `src/dev_pricing_router.erl`: HyperBEAM pricing-device adapter registered as
+  `pricing-router@1.0`. It keeps static process route pricing on
+  `simple-pay@1.0`, while routing bundler uploads to `metering@1.0`.
+- `src/dev_bundler_settlement.erl`: bundle-completion hook handler registered
+  as `bundler-settlement@1.0`. It runs after the bundler has posted and seeded
+  the bundle, prices each completed item with `metering@1.0`, and transfers the
+  local ledger balance from the node account to the beneficiary account.
 - `src/hb_opts.erl`: preloads `ao-payment@1.0` so the verifier device is
   available through the normal HyperBEAM device map, and preloads
-  `process-ledger@1.0` for the p4 ledger adapter.
+  `process-ledger@1.0`, `pricing-router@1.0`, and
+  `bundler-settlement@1.0`.
 - `scripts/start-bulbasaur.erl` and `scripts/start-bulbasaur.sh`: start the
   paid node, create/load the local ledger process, wire `p4@1.0` and
   `simple-pay@1.0`, and print the runtime IDs needed for testing.
@@ -65,22 +75,40 @@ flowchart LR
     Device["Bulbasaur ao-payment@1.0 device"]
     Ledger["Bulbasaur local ledger process"]
     P4["p4@1.0 request hook"]
-    Pay["simple-pay@1.0 pricing device"]
+    Router["pricing-router@1.0"]
+    Pay["simple-pay@1.0"]
+    Meter["metering@1.0"]
+    Settle["bundler-settlement@1.0"]
     PL["process-ledger@1.0 adapter"]
     Proc["Target process@1.0"]
+    Bundler["bundler@1.0"]
+    AR["Arweave gateway"]
+    Beneficiary["Beneficiary wallet"]
 
-    Buyer -->|"Transfer 1 AO base unit<br/>Action=Transfer<br/>Recipient=ledger<br/>X-HB-Recipient=buyer"| AO
+    Buyer -->|"Transfer AO<br/>Recipient=node deposit address<br/>X-HB-Recipient=buyer"| AO
     AO -->|"scheduled message +<br/>Debit/Credit notices"| State
     Bridge -->|"message id, slot,<br/>sender, recipient, quantity"| Device
     Device -->|"verify transfer and notices"| State
     Device -->|"operator-signed local credit"| Ledger
 
     Buyer -->|"signed process compute request"| P4
-    P4 -->|"quote/check route price"| Pay
+    P4 -->|"select process pricing"| Router
+    Router -->|"static route price"| Pay
     P4 -->|"check balance / charge"| PL
     PL -->|"read balance / push charge"| Ledger
     P4 -->|"allow funded request"| Proc
     Proc -->|"compute result"| Buyer
+
+    Buyer -->|"signed ANS-104 bundler upload"| P4
+    P4 -->|"select bundler pricing"| Router
+    Router -->|"quote and final byte price"| Meter
+    P4 -->|"charge uploader; credit node account"| PL
+    P4 -->|"accepted upload"| Bundler
+    Bundler -->|"post tx and seed chunks/proofs"| AR
+    Bundler -->|"bundled-message-complete hook"| Settle
+    Settle -->|"charge node account; credit beneficiary"| PL
+    PL --> Ledger
+    Ledger --> Beneficiary
 ```
 
 Run the local payment E2E check with:
@@ -103,8 +131,75 @@ Defaults:
 - Operator wallet: `bulbasaur-wallet.json`, override with `HB_KEY=/path/to/wallet.json`.
 - AO root token process: `0syT13r0s0tgPmIed95bJnuSqaD29HQNN8D3ElLSrsc`, override with `BULBASAUR_AO_TOKEN=<process-id>`.
 - Process route price: `1` AO base unit, override with `BULBASAUR_PROCESS_PRICE=25`.
+- Bundler upload byte price: `1162726` AO base units per bundled byte,
+  override with `BULBASAUR_BUNDLER_BYTE_PRICE=2`. The default approximates
+  `$0.0025797/KiB` at `$2.60/AO` plus a 20% operator premium.
+- Bundler item dispatch threshold: `1000` items by default, override with
+  `BULBASAUR_BUNDLER_MAX_ITEMS=1` for local smoke testing.
+- Bundler beneficiary: defaults to the node/operator wallet, override with
+  `BULBASAUR_BENEFICIARY=<wallet-address>`.
 - Paid route template: `/.*~process@1.0/.*`.
+- Paid bundler route template: `/~bundler@1.0/tx`.
 - Generic non-process routes are free because `simple-pay-price` is set to `0`.
+  Bundler uploads are priced dynamically by `metering@1.0`, not by the static
+  route price.
+
+## Paid Bundling Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Uploader wallet
+    participant P4 as p4@1.0
+    participant PR as pricing-router@1.0
+    participant M as metering@1.0
+    participant PL as process-ledger@1.0
+    participant L as Local AO-token ledger
+    participant B as bundler@1.0
+    participant AR as Arweave gateway
+    participant S as bundler-settlement@1.0
+    participant BEN as Beneficiary wallet
+
+    U->>P4: POST signed ANS-104 item to /~bundler@1.0/tx
+    P4->>PR: estimate(request)
+    PR->>M: estimate bundled arweave-bytes
+    P4->>PL: balance(uploader) >= estimated price
+    PL->>L: read uploader balance
+    L-->>PL: balance
+    PL-->>P4: sufficient or 402
+
+    alt sufficient local balance
+        P4->>B: execute bundler upload
+        B->>M: consume(arweave-bytes, bundled item size)
+        B-->>P4: 200 accepted with item id
+        P4->>M: price(response)
+        P4->>PL: charge uploader; credit node account
+        PL->>L: operator-signed charge
+        B->>AR: post bundle transaction
+        B->>AR: seed chunks/proofs
+        AR-->>B: 200 for tx and all required chunks/proofs
+        B->>S: bundled-message-complete hook
+        S->>M: quote(arweave-bytes, bundled item size)
+        S->>PL: charge node account; credit beneficiary
+        PL->>L: operator-signed settlement charge
+        L-->>BEN: beneficiary local balance increases
+    else insufficient local balance
+        P4-->>U: 402 insufficient funds
+    end
+```
+
+There is no custom escrow helper in this model. The user's local ledger balance
+is debited when P4 successfully returns the bundler POST response, crediting the
+node's local ledger account. The delay between that accepted upload and
+`bundled-message-complete` is the settlement window. After `bundle_complete`
+has posted the transaction and seeded all required chunks/proofs, the
+`bundled-message-complete` hook settles the same metered amount from the node
+account to the configured beneficiary.
+
+`bundle_complete` is the bundler's "posted and seeded" signal. It is not an
+Arweave finality confirmation, but it is the point at which the local bundling
+job has completed. A regression test verifies that the completion hook does not
+fire while chunk seeding is still failing.
 
 The important token selector is not a knob on `p4@1.0`. It is the ledger
 process definition's `token` field. In this checkout, `BULBASAUR_AO_TOKEN`
@@ -112,8 +207,8 @@ feeds that field on the local ledger process.
 
 ## Paying for Compute with AO
 
-1. Start Bulbasaur and note the printed `Ledger AO funding account` value.
-2. Transfer AO to the ledger process using the AO mainnet flow. Keep the
+1. Start Bulbasaur and note the printed `AO deposit address` value.
+2. Transfer AO to that node deposit address using the AO mainnet flow. Keep the
    returned message ID and assignment slot.
 3. Run the local AO payment bridge. It calls Bulbasaur's `~ao-payment@1.0`
    device, which verifies the transfer against the configured AO mainnet state
@@ -124,8 +219,9 @@ feeds that field on the local ledger process.
 5. Deploy or target a process on Bulbasaur.
 6. Send a signed compute request to `GET /<ProcessID>~process@1.0/compute`.
 
-The root-token transfer is not sent to the Bulbasaur HTTP node. It is sent to
-the AO token process itself. The bridge verifies the resulting AO
+The root-token transfer is not sent to the Bulbasaur HTTP node or to the local
+ledger process. It is sent to the AO token process itself with the node's
+deposit address as the recipient. The bridge verifies the resulting AO
 `Debit-Notice` and `Credit-Notice` before sending an operator-signed local
 credit into Bulbasaur. It must not use the AO testnet CU/MU endpoints for this
 mainnet AO token flow.
@@ -152,7 +248,7 @@ The device verifies:
 
 - the scheduled AO message at the supplied slot is the expected transfer
 - the computed result contains the expected `Debit-Notice` and `Credit-Notice`
-- the notice target is the Bulbasaur ledger process
+- the notice target is the Bulbasaur AO deposit address
 - the sender, credited recipient, and quantity match
 - the AO payment id has not already been imported by this node process
 
@@ -180,7 +276,7 @@ For the AO deposit itself, schedule a transfer on the root AO token process with
 
 ```text
 action = "Transfer"
-recipient = "<Bulbasaur ledger process ID>"
+recipient = "<Bulbasaur AO deposit address>"
 quantity = "<amount>"
 X-HB-Recipient = "<local ledger account to credit>"
 ```
@@ -190,7 +286,7 @@ With `@permaweb/aoconnect`, that is the tag set:
 ```js
 [
   { name: "Action", value: "Transfer" },
-  { name: "Recipient", value: "<Bulbasaur ledger process ID>" },
+  { name: "Recipient", value: "<Bulbasaur AO deposit address>" },
   { name: "Quantity", value: "<amount>" },
   { name: "X-HB-Recipient", value: "<local ledger account to credit>" }
 ]

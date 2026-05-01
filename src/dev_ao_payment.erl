@@ -1,7 +1,7 @@
 %%% @doc Import verified AO token payments into a local HyperBEAM payment
 %%% ledger. This device expects production AO token transfers of the form:
 %%%
-%%%     Action=Transfer, Recipient=<ledger process id>, Quantity=<raw units>
+%%%     Action=Transfer, Recipient=<node deposit address>, Quantity=<raw units>
 %%%
 %%% It verifies the resulting `Debit-Notice' and `Credit-Notice' from AO
 %%% mainnet state before scheduling a local `Credit-Notice' into the configured
@@ -45,18 +45,25 @@ ingest(Base, Req, NodeMsg) ->
 verify(_Base, Req, NodeMsg) ->
     Token = hb_ao:get(<<"token">>, Req, hb_opts:get(ao_payment_token, ?DEFAULT_AO_TOKEN, NodeMsg), NodeMsg),
     Ledger = hb_ao:get(<<"ledger">>, Req, hb_opts:get(ao_payment_ledger, undefined, NodeMsg), NodeMsg),
+    DepositAddress =
+        hb_ao:get(
+            <<"deposit-address">>,
+            Req,
+            hb_opts:get(ao_payment_deposit_address, Ledger, NodeMsg),
+            NodeMsg
+        ),
     MessageID = hb_ao:get(<<"message-id">>, Req, hb_ao:get(<<"id">>, Req, undefined, NodeMsg), NodeMsg),
     Slot = hb_ao:get(<<"slot">>, Req, undefined, NodeMsg),
     Sender = hb_ao:get(<<"sender">>, Req, undefined, NodeMsg),
     Quantity = hb_util:bin(hb_ao:get(<<"quantity">>, Req, undefined, NodeMsg)),
     RequestedRecipient = hb_ao:get(<<"recipient">>, Req, undefined, NodeMsg),
     case lists:any(fun(V) -> V =:= undefined orelse V =:= <<"undefined">> end,
-        [Token, Ledger, MessageID, Slot, Sender, Quantity])
+        [Token, Ledger, DepositAddress, MessageID, Slot, Sender, Quantity])
     of
         true ->
             {error, #{
                 <<"status">> => 400,
-                <<"body">> => <<"Missing token, ledger, message-id, slot, sender, or quantity.">>
+                <<"body">> => <<"Missing token, ledger, deposit-address, message-id, slot, sender, or quantity.">>
             }};
         false ->
             case fetch_schedule(Token, Slot, NodeMsg) of
@@ -64,6 +71,7 @@ verify(_Base, Req, NodeMsg) ->
                     Expected = #{
                         <<"token">> => Token,
                         <<"ledger">> => Ledger,
+                        <<"deposit-address">> => DepositAddress,
                         <<"message-id">> => MessageID,
                         <<"slot">> => hb_util:bin(Slot),
                         <<"sender">> => Sender,
@@ -134,7 +142,7 @@ format_reason(Reason) ->
 verify_schedule(Schedule, Expected, NodeMsg) ->
     Edges = hb_maps:get(<<"edges">>, Schedule, [], NodeMsg),
     MessageID = hb_maps:get(<<"message-id">>, Expected, undefined, NodeMsg),
-    Ledger = hb_maps:get(<<"ledger">>, Expected, undefined, NodeMsg),
+    DepositAddress = hb_maps:get(<<"deposit-address">>, Expected, undefined, NodeMsg),
     Quantity = hb_maps:get(<<"quantity">>, Expected, undefined, NodeMsg),
     Slot = hb_maps:get(<<"slot">>, Expected, undefined, NodeMsg),
     Found =
@@ -147,7 +155,7 @@ verify_schedule(Schedule, Expected, NodeMsg) ->
                 AssignmentTags = hb_maps:get(<<"Tags">>, Assignment, [], NodeMsg),
                 hb_maps:get(<<"Id">>, Message, undefined, NodeMsg) =:= MessageID
                     andalso tag_value(MessageTags, <<"Action">>, NodeMsg) =:= <<"Transfer">>
-                    andalso tag_value(MessageTags, <<"Recipient">>, NodeMsg) =:= Ledger
+                    andalso tag_value(MessageTags, <<"Recipient">>, NodeMsg) =:= DepositAddress
                     andalso hb_util:bin(tag_value(MessageTags, <<"Quantity">>, NodeMsg)) =:= Quantity
                     andalso hb_util:bin(tag_value(AssignmentTags, <<"Nonce">>, NodeMsg)) =:= Slot
             end,
@@ -165,19 +173,19 @@ verify_schedule(Schedule, Expected, NodeMsg) ->
 verify_result(Result, Expected, NodeMsg) ->
     Raw = hb_maps:get(<<"raw">>, Result, Result, NodeMsg),
     Messages = hb_maps:get(<<"Messages">>, Raw, [], NodeMsg),
-    Ledger = hb_maps:get(<<"ledger">>, Expected, undefined, NodeMsg),
+    DepositAddress = hb_maps:get(<<"deposit-address">>, Expected, undefined, NodeMsg),
     Sender = hb_maps:get(<<"sender">>, Expected, undefined, NodeMsg),
     Quantity = hb_maps:get(<<"quantity">>, Expected, undefined, NodeMsg),
     Debit = find_notice(
         <<"Debit-Notice">>,
         Sender,
-        #{<<"Recipient">> => Ledger, <<"Quantity">> => Quantity},
+        #{<<"Recipient">> => DepositAddress, <<"Quantity">> => Quantity},
         Messages,
         NodeMsg
     ),
     Credit = find_notice(
         <<"Credit-Notice">>,
-        Ledger,
+        DepositAddress,
         #{<<"Sender">> => Sender, <<"Quantity">> => Quantity},
         Messages,
         NodeMsg
@@ -306,6 +314,7 @@ verify_result_requires_debit_and_credit_test() ->
         <<"token">> => <<"ao-token">>,
         <<"message-id">> => <<"message-id">>,
         <<"ledger">> => <<"ledger">>,
+        <<"deposit-address">> => <<"node-address">>,
         <<"sender">> => <<"sender">>,
         <<"quantity">> => <<"1">>,
         <<"requested-recipient">> => undefined
@@ -314,12 +323,12 @@ verify_result_requires_debit_and_credit_test() ->
         <<"Target">> => <<"sender">>,
         <<"Tags">> => [
             #{<<"name">> => <<"Action">>, <<"value">> => <<"Debit-Notice">>},
-            #{<<"name">> => <<"Recipient">>, <<"value">> => <<"ledger">>},
+            #{<<"name">> => <<"Recipient">>, <<"value">> => <<"node-address">>},
             #{<<"name">> => <<"Quantity">>, <<"value">> => <<"1">>}
         ]
     },
     Credit = #{
-        <<"Target">> => <<"ledger">>,
+        <<"Target">> => <<"node-address">>,
         <<"Tags">> => [
             #{<<"name">> => <<"Action">>, <<"value">> => <<"Credit-Notice">>},
             #{<<"name">> => <<"Sender">>, <<"value">> => <<"sender">>},
@@ -350,7 +359,7 @@ verify_schedule_matches_expected_transfer_test() ->
                         <<"Id">> => <<"message-id">>,
                         <<"Tags">> => [
                             tag(<<"Action">>, <<"Transfer">>),
-                            tag(<<"Recipient">>, <<"ledger">>),
+                            tag(<<"Recipient">>, <<"node-address">>),
                             tag(<<"Quantity">>, <<"1">>)
                         ]
                     },
@@ -364,6 +373,7 @@ verify_schedule_matches_expected_transfer_test() ->
     Expected = #{
         <<"message-id">> => <<"message-id">>,
         <<"ledger">> => <<"ledger">>,
+        <<"deposit-address">> => <<"node-address">>,
         <<"quantity">> => <<"1">>,
         <<"slot">> => <<"7">>
     },
@@ -406,6 +416,7 @@ payment_expected(RequestedRecipient) ->
         <<"token">> => <<"ao-token">>,
         <<"message-id">> => <<"message-id">>,
         <<"ledger">> => <<"ledger">>,
+        <<"deposit-address">> => <<"node-address">>,
         <<"sender">> => <<"sender">>,
         <<"quantity">> => <<"1">>,
         <<"requested-recipient">> => RequestedRecipient

@@ -134,7 +134,9 @@ bundler_dynamic_metering() ->
     UploaderWallet = ar_wallet:new(),
     UploaderAddress = hb_util:human_id(ar_wallet:to_address(UploaderWallet)),
     Item = bundle_payment_item(),
-    ItemSize = byte_size(ar_bundles:serialize(Item)),
+    ClientOpts = #{ <<"store">> => hb_test_utils:test_store() },
+    StructuredItem = bundle_payment_structured_item(Item, ClientOpts),
+    ItemSize = bundle_payment_item_size(StructuredItem, ClientOpts),
     Rate = 2,
     InitialBalance = (ItemSize * Rate) + 50,
     Anchor = rand:bytes(32),
@@ -170,23 +172,10 @@ bundler_dynamic_metering() ->
         },
     try
         Node = hb_http_server:start_node(Opts),
-        StructuredItem =
-            hb_message:convert(
-                Item,
-                <<"structured@1.0">>,
-                <<"ans104@1.0">>,
-                Opts
-            ),
-        UploadReq =
-            hb_message:commit(
-                #{
-                    <<"path">> => <<"/~bundler@1.0/tx">>,
-                    <<"bundler-subject">> => <<"body">>,
-                    <<"body">> => StructuredItem
-                },
-                #{ <<"priv-wallet">> => UploaderWallet }
-            ),
-        ?assertMatch({ok, _}, hb_http:post(Node, UploadReq, #{})),
+        ?assertMatch(
+            {ok, _},
+            bundle_payment_upload(Node, StructuredItem, UploaderWallet, ClientOpts)
+        ),
         ?assertEqual(50, bundle_payment_balance(Node, UploaderWallet))
     after
         hb_mock_server:stop(ServerHandle),
@@ -200,14 +189,13 @@ bundler_completion_payment_hook_test_() ->
 bundler_completion_payment_hook() ->
     HostWallet = ar_wallet:new(),
     UploaderWallet = ar_wallet:new(),
+    BeneficiaryWallet = ar_wallet:new(),
     OperatorAddress = hb_util:human_id(ar_wallet:to_address(HostWallet)),
     UploaderAddress = hb_util:human_id(ar_wallet:to_address(UploaderWallet)),
-    InitialBalance = 100,
-    UploadFee = 10,
-    BundleReleaseAmount = 7,
+    BeneficiaryAddress =
+        hb_util:human_id(ar_wallet:to_address(BeneficiaryWallet)),
+    Rate = 2,
     Item = bundle_payment_item(),
-    ExpectedItemID = hb_util:encode(ar_bundles:id(Item, signed)),
-    ExpectedItemSize = byte_size(ar_bundles:serialize(Item)),
     Anchor = rand:bytes(32),
     NetworkPrice = 12345,
     {ServerHandle, GatewayOpts} =
@@ -218,6 +206,10 @@ bundler_completion_payment_hook() ->
             }
         ),
     Store = hb_test_utils:test_store(),
+    ClientOpts = #{ <<"store">> => hb_test_utils:test_store() },
+    StructuredItem = bundle_payment_structured_item(Item, ClientOpts),
+    UploadFee = bundle_payment_item_size(StructuredItem, ClientOpts) * Rate,
+    InitialBalance = UploadFee + 50,
     {LedgerPath, LedgerProc} =
         bundle_payment_process_ledger(
             HostWallet,
@@ -228,8 +220,25 @@ bundler_completion_payment_hook() ->
         #{
             <<"device">> => <<"p4@1.0">>,
             <<"ledger-device">> => <<"process-ledger@1.0">>,
-            <<"pricing-device">> => <<"simple-pay@1.0">>,
-            <<"ledger-path">> => LedgerPath
+            <<"pricing-device">> => <<"pricing-router@1.0">>,
+            <<"default-pricing-device">> => <<"simple-pay@1.0">>,
+            <<"ledger-path">> => LedgerPath,
+            <<"pricing-routes">> => [
+                #{
+                    <<"template">> => <<"/~bundler@1.0/tx">>,
+                    <<"pricing-device">> => <<"metering@1.0">>
+                }
+            ]
+        },
+    SettlementHook =
+        #{
+            <<"device">> => <<"bundler-settlement@1.0">>,
+            <<"ledger-device">> => <<"process-ledger@1.0">>,
+            <<"pricing-device">> => <<"metering@1.0">>,
+            <<"ledger-path">> => LedgerPath,
+            <<"settlement-account">> => OperatorAddress,
+            <<"beneficiary">> => BeneficiaryAddress,
+            <<"hook">> => #{ <<"result">> => <<"ignore">> }
         },
     Opts =
         GatewayOpts#{
@@ -239,207 +248,43 @@ bundler_completion_payment_hook() ->
             <<"simple-pay-price">> => 0,
             <<"operator">> => OperatorAddress,
             <<"p4-recipient">> => OperatorAddress,
-            <<"router-opts">> => #{
-                <<"offered">> => [
-                    #{
-                        <<"template">> => <<"/~bundler@1.0/tx">>,
-                        <<"price">> => UploadFee
-                    }
-                ]
+            <<"metering-rates">> => #{
+                <<"arweave-bytes">> => Rate,
+                <<"beam-reductions">> => 0
             },
             <<"on">> => #{
                 <<"request">> => ProcessorMsg,
                 <<"response">> => ProcessorMsg,
-                <<"bundled-message-complete">> =>
-                    bundle_payment_message_hook(
-                        ExpectedItemID,
-                        ExpectedItemSize,
-                        0,
-                        OperatorAddress
-                    ),
-                <<"bundle-complete">> =>
-                    bundle_payment_release_hook(
-                        BundleReleaseAmount,
-                        OperatorAddress,
-                        UploaderAddress,
-                        LedgerPath
-                    )
+                <<"bundled-message-complete">> => SettlementHook
             }
         },
     try
         {ok, _LedgerCacheID} = hb_cache:write(LedgerProc, Opts),
         Node = hb_http_server:start_node(Opts),
-        StructuredItem =
-            hb_message:convert(
-                Item,
-                <<"structured@1.0">>,
-                <<"ans104@1.0">>,
-                Opts
-            ),
-        UploadReq =
-            hb_message:commit(
-                #{
-                    <<"path">> => <<"/~bundler@1.0/tx">>,
-                    <<"bundler-subject">> => <<"body">>,
-                    <<"body">> => StructuredItem
-                },
-                #{ <<"priv-wallet">> => UploaderWallet }
-            ),
-        ?assertMatch({ok, _}, hb_http:post(Node, UploadReq, #{})),
+        ?assertMatch(
+            {ok, _},
+            bundle_payment_upload(Node, StructuredItem, UploaderWallet, ClientOpts)
+        ),
         ?assert(
             hb_util:wait_until(
                 fun() ->
-                    bundle_payment_balance(Node, HostWallet)
-                        =:= UploadFee + BundleReleaseAmount
+                    bundle_payment_balance(Node, BeneficiaryWallet) =:= UploadFee
                 end,
                 5000
             )
         ),
         ?assertEqual(
-            InitialBalance - UploadFee - BundleReleaseAmount,
+            InitialBalance - UploadFee,
             bundle_payment_balance(Node, UploaderWallet)
         ),
+        ?assertEqual(0, bundle_payment_balance(Node, HostWallet)),
         ?assertEqual(
-            UploadFee + BundleReleaseAmount,
-            bundle_payment_balance(Node, HostWallet)
+            UploadFee,
+            bundle_payment_balance(Node, BeneficiaryWallet)
         )
     after
         hb_mock_server:stop(ServerHandle),
         dev_bundler:stop_server(Opts)
-    end.
-
-%% @doc Build a per-message hook that validates the item payload and releases pay.
-bundle_payment_message_hook(
-        ExpectedItemID,
-        ExpectedItemSize,
-        ReleaseAmount,
-        ReleaseAddress
-    ) ->
-    #{
-        <<"expected-item-id">> => ExpectedItemID,
-        <<"expected-item-size">> => ExpectedItemSize,
-        <<"release-amount">> => ReleaseAmount,
-        <<"release-recipient">> => ReleaseAddress,
-        <<"device">> => #{
-            bundled_message_complete =>
-                fun(Base, Req, Opts) ->
-                    Body = hb_maps:get(<<"body">>, Req, not_found, Opts),
-                    Size = hb_maps:get(<<"bundled-size">>, Req, not_found, Opts),
-                    ExpectedID =
-                        hb_maps:get(
-                            <<"expected-item-id">>,
-                            Base,
-                            undefined,
-                            Opts
-                        ),
-                    ExpectedSize =
-                        hb_maps:get(
-                            <<"expected-item-size">>,
-                            Base,
-                            undefined,
-                            Opts
-                        ),
-                    case {hb_message:id(Body, signed, Opts), Size} of
-                        {ExpectedID, ExpectedSize} ->
-                            bundle_payment_release(Base, Req, Opts);
-                        _ ->
-                            {error, invalid_bundled_message_hook_payload}
-                    end
-                end
-        },
-        <<"hook">> => #{ <<"result">> => <<"ignore">> }
-    }.
-
-%% @doc Build a bundle hook that validates the bundle payload and releases pay.
-bundle_payment_release_hook(ReleaseAmount, ReleaseAddress) ->
-    #{
-        <<"release-amount">> => ReleaseAmount,
-        <<"release-recipient">> => ReleaseAddress,
-        <<"device">> => #{
-            bundle_complete =>
-                fun(Base, Req, Opts) ->
-                    Body = hb_maps:get(<<"body">>, Req, not_found, Opts),
-                    Size = hb_maps:get(<<"bundled-size">>, Req, not_found, Opts),
-                    case
-                        is_map(Body) andalso
-                        is_integer(Size) andalso
-                        (Size =:= bundle_payment_bundle_size(Body, Opts))
-                    of
-                        true ->
-                            bundle_payment_release(Base, Req, Opts);
-                        false -> {error, invalid_bundle_hook_payload}
-                    end
-                end
-        },
-        <<"hook">> => #{ <<"result">> => <<"ignore">> }
-    }.
-
-%% @doc Build a bundle hook that releases payment through a process ledger.
-bundle_payment_release_hook(
-        ReleaseAmount,
-        ReleaseAddress,
-        ReleaseAccount,
-        LedgerPath
-    ) ->
-    (bundle_payment_release_hook(ReleaseAmount, ReleaseAddress))#{
-        <<"ledger-device">> => <<"process-ledger@1.0">>,
-        <<"ledger-path">> => LedgerPath,
-        <<"release-account">> => ReleaseAccount
-    }.
-
-%% @doc Release a configured amount to a configured recipient via the configured ledger.
-bundle_payment_release(Base, Req, Opts) ->
-    Amount = hb_maps:get(<<"release-amount">>, Base, 0, Opts),
-    Recipient = hb_maps:get(<<"release-recipient">>, Base, undefined, Opts),
-    case hb_maps:get(<<"ledger-device">>, Base, <<"simple-pay@1.0">>, Opts) of
-        <<"process-ledger@1.0">> ->
-            Account = hb_maps:get(<<"release-account">>, Base, undefined, Opts),
-            LedgerPath = hb_maps:get(<<"ledger-path">>, Base, undefined, Opts),
-            ChargeReq =
-                hb_message:commit(
-                    #{
-                        <<"path">> => <<"charge">>,
-                        <<"quantity">> => Amount,
-                        <<"account">> => Account,
-                        <<"recipient">> => Recipient,
-                        <<"request">> => Req
-                    },
-                    Opts
-                ),
-            case
-                hb_ao:resolve(
-                    #{
-                        <<"device">> => <<"process-ledger@1.0">>,
-                        <<"ledger-path">> => LedgerPath
-                    },
-                    ChargeReq,
-                    Opts
-                )
-            of
-                {ok, _} -> {ok, Req};
-                Error -> Error
-            end;
-        _ ->
-            TopupReq =
-                hb_message:commit(
-                    #{
-                        <<"path">> => <<"topup">>,
-                        <<"amount">> => Amount,
-                        <<"recipient">> => Recipient,
-                        <<"request">> => Req
-                    },
-                    Opts
-                ),
-            case
-                hb_ao:resolve(
-                    #{ <<"device">> => <<"simple-pay@1.0">> },
-                    TopupReq,
-                    Opts
-                )
-            of
-                {ok, _Balance} -> {ok, Req};
-                Error -> Error
-            end
     end.
 
 %% @doc Create a process-backed AO token ledger for bundler payment examples.
@@ -484,19 +329,41 @@ bundle_payment_process_ledger(HostWallet, Store, Balances) ->
     LedgerID = hb_util:human_id(hb_message:id(LedgerProc, signed, Opts)),
     {<<"/", LedgerID/binary, "~process@1.0">>, LedgerProc}.
 
-%% @doc Calculate the byte size of a completed bundle transaction.
-bundle_payment_bundle_size(Bundle, Opts) ->
+%% @doc Prepare a structured ANS-104 item with a client-local cache context.
+bundle_payment_structured_item(Item, Opts) ->
+    hb_cache:ensure_all_loaded(
+        hb_message:convert(
+            Item,
+            <<"structured@1.0">>,
+            <<"ans104@1.0">>,
+            Opts
+        ),
+        Opts
+    ).
+
+%% @doc Upload an item through the bundler using the same opts that signed it.
+bundle_payment_upload(Node, StructuredItem, Wallet, Opts) ->
+    UploadReq =
+        hb_message:commit(
+            #{
+                <<"path">> => <<"/~bundler@1.0/tx">>,
+                <<"bundler-subject">> => <<"body">>,
+                <<"body">> => StructuredItem
+            },
+            Opts#{ <<"priv-wallet">> => Wallet }
+        ),
+    hb_http:post(Node, UploadReq, Opts).
+
+%% @doc Calculate the byte size of an item inside its bundle.
+bundle_payment_item_size(Item, Opts) ->
     TX =
         hb_message:convert(
-            Bundle,
-            <<"tx@1.0">>,
+            Item,
+            #{ <<"device">> => <<"ans104@1.0">>, <<"bundle">> => true },
             <<"structured@1.0">>,
             Opts
         ),
-    case TX#tx.data_size of
-        Size when is_integer(Size) -> Size;
-        _ -> byte_size(TX#tx.data)
-    end.
+    byte_size(ar_bundles:serialize(TX)).
 
 %% @doc Build a signed data item used by the bundler payment examples.
 bundle_payment_item() ->
