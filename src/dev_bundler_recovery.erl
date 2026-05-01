@@ -34,7 +34,11 @@ do_recover_unbundled_items(ServerPID, Opts) ->
                         {id, {string, ItemID}}
                     }
                 ),
-                ServerPID ! {enqueue_item, Item}
+                ServerPID ! {
+                    enqueue_item,
+                    Item,
+                    dev_bundler_cache:get_item_escrow(ItemID, Opts)
+                }
             end,
             fun(ItemID) ->
                 ?event(
@@ -124,7 +128,11 @@ recover_bundle(ServerPID, TXID, Status, Opts) ->
                         throw({failed_to_load_bundle_item, ItemID})
                     end
                 ),
-                ServerPID ! {recover_bundle, CommittedTX, Items}
+                Escrows = [
+                    dev_bundler_cache:get_item_escrow(Item, Opts)
+                    || Item <- Items
+                ],
+                ServerPID ! {recover_bundle, CommittedTX, Items, Escrows}
         end
     catch
         _:Error:Stack ->
@@ -228,6 +236,8 @@ receive_enqueue_items(0, Items) ->
 receive_enqueue_items(Count, Items) ->
     receive
         {enqueue_item, Item} ->
+            receive_enqueue_items(Count - 1, [Item | Items]);
+        {enqueue_item, Item, _Escrow} ->
             receive_enqueue_items(Count - 1, [Item | Items])
     after 1000 ->
         erlang:error({missing_enqueue_items, Count})
@@ -236,6 +246,8 @@ receive_enqueue_items(Count, Items) ->
 receive_recovered_bundle() ->
     receive
         {recover_bundle, CommittedTX, Items} ->
+            {CommittedTX, Items};
+        {recover_bundle, CommittedTX, Items, _Escrows} ->
             {CommittedTX, Items}
     after 1000 ->
         erlang:error(missing_recovered_bundle)

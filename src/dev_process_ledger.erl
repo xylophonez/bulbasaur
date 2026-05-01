@@ -3,7 +3,7 @@
 %%% This device reads balances from a configured `process@1.0' ledger and pushes
 %%% operator-signed charge messages back into that process.
 -module(dev_process_ledger).
--export([balance/3, charge/3]).
+-export([balance/3, charge/3, reserve/3, release/3, refund/3]).
 -include("include/hb.hrl").
 
 -ifdef(TEST).
@@ -32,6 +32,18 @@ balance(Base, Req, NodeMsg) ->
 
 %% @doc Apply a p4 charge by pushing the signed charge request to the ledger.
 charge(Base, Req, NodeMsg) ->
+    push_ledger_action(Base, Req, NodeMsg).
+
+reserve(Base, Req, NodeMsg) ->
+    push_ledger_action(Base, Req, NodeMsg).
+
+release(Base, Req, NodeMsg) ->
+    push_ledger_action(Base, Req, NodeMsg).
+
+refund(Base, Req, NodeMsg) ->
+    push_ledger_action(Base, Req, NodeMsg).
+
+push_ledger_action(Base, Req, NodeMsg) ->
     case ledger_path(Base, NodeMsg) of
         undefined ->
             {error, #{
@@ -143,6 +155,40 @@ charge_pushes_to_process_ledger_test_() ->
         ?assertMatch({ok, _}, charge(Base, ChargeReq, Opts)),
         ?assertEqual({ok, 98}, balance(Base, #{ <<"target">> => AliceAddress }, Opts)),
         ?assertEqual({ok, 2}, balance(Base, #{ <<"target">> => BobAddress }, Opts))
+    end}.
+
+reserve_release_process_ledger_test_() ->
+    {timeout, 30, fun() ->
+        {Base, Opts, AliceAddress, BobAddress, HostWallet, _AliceWallet} =
+            test_ledger(100),
+        ReserveReq =
+            hb_message:commit(
+                #{
+                    <<"path">> => <<"reserve">>,
+                    <<"reservation-id">> => <<"reservation-1">>,
+                    <<"quantity">> => 25,
+                    <<"account">> => AliceAddress,
+                    <<"recipient">> => BobAddress,
+                    <<"request">> => #{ <<"path">> => <<"/~bundler@1.0/tx">> }
+                },
+                Opts#{ <<"priv-wallet">> => HostWallet }
+            ),
+        ?assertMatch({ok, _}, reserve(Base, ReserveReq, Opts)),
+        ?assertEqual({ok, 75}, balance(Base, #{ <<"target">> => AliceAddress }, Opts)),
+        ?assertEqual({ok, 0}, balance(Base, #{ <<"target">> => BobAddress }, Opts)),
+        ReleaseReq =
+            hb_message:commit(
+                #{
+                    <<"path">> => <<"release">>,
+                    <<"reservation-id">> => <<"reservation-1">>,
+                    <<"recipient">> => BobAddress,
+                    <<"request">> => #{ <<"path">> => <<"/~bundler@1.0/tx">> }
+                },
+                Opts#{ <<"priv-wallet">> => HostWallet }
+            ),
+        ?assertMatch({ok, _}, release(Base, ReleaseReq, Opts)),
+        ?assertEqual({ok, 75}, balance(Base, #{ <<"target">> => AliceAddress }, Opts)),
+        ?assertEqual({ok, 25}, balance(Base, #{ <<"target">> => BobAddress }, Opts))
     end}.
 
 test_ledger(AliceBalance) ->

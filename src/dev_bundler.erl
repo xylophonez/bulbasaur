@@ -49,34 +49,40 @@ item(_Base, Req, Opts) ->
     case verify_message(ItemToProcess, Opts) of
         {ok, Item} ->
             ItemID = hb_message:id(Item, signed, Opts),
-            case cache_item(Item, Opts) of
-                ok ->
-                    BundledSize = bundled_item_size(Item, Opts),
-                    dev_metering:consume(
-                        <<"arweave-bytes">>,
-                        BundledSize,
-                        Opts
-                    ),
-                    % Queue the item for bundling
-                    % (fire-and-forget, ignore errors)
-                    ServerPID ! {enqueue_item, Item, BundledSize},
-                    {ok, #{
-                        <<"id">> => ItemID,
-                        <<"timestamp">> => erlang:system_time(millisecond)
-                    }};
-                {error, Reason} ->
-                    ?event(
-                        bundler_short,
-                        {cache_write_failed,
-                            {id, {explicit, ItemID}},
-                            {reason, Reason}
-                        }
-                    ),
-                    {error, #{
-                        <<"status">> => 500,
-                        <<"error">> => <<"cache-write-failed">>,
-                        <<"details">> => error_to_bin(Reason)
-                    }}
+            BundledSize = bundled_item_size(Item, Opts),
+            case dev_bundler_escrow:reserve(Item, ItemID, BundledSize, Opts) of
+                {ok, Escrow} ->
+                    case cache_item(Item, Escrow, Opts) of
+                        ok ->
+                            dev_metering:consume(
+                                <<"arweave-bytes">>,
+                                BundledSize,
+                                Opts
+                            ),
+                            % Queue the item for bundling
+                            % (fire-and-forget, ignore errors)
+                            ServerPID ! {enqueue_item, Item, BundledSize, Escrow},
+                            {ok, #{
+                                <<"id">> => ItemID,
+                                <<"timestamp">> => erlang:system_time(millisecond)
+                            }};
+                        {error, Reason} ->
+                            ok = maybe_refund(Escrow, Opts),
+                            ?event(
+                                bundler_short,
+                                {cache_write_failed,
+                                    {id, {explicit, ItemID}},
+                                    {reason, Reason}
+                                }
+                            ),
+                            {error, #{
+                                <<"status">> => 500,
+                                <<"error">> => <<"cache-write-failed">>,
+                                <<"details">> => error_to_bin(Reason)
+                            }}
+                    end;
+                {error, EscrowError} ->
+                    {error, EscrowError}
             end;
         {error, Reason} ->
             {error, #{
@@ -127,12 +133,23 @@ error_to_bin(Reason) ->
 
 %% @doc Cache an item.
 %% Returns ok or {error, Reason}.
-cache_item(Item, Opts) ->
+cache_item(Item, Escrow, Opts) ->
     try
-        dev_bundler_cache:write_item(Item, Opts)
+        dev_bundler_cache:write_item(Item, Escrow, Opts)
     catch
         Type:ExceptionReason ->
             {error, {Type, ExceptionReason}}
+    end.
+
+maybe_refund(none, _Opts) ->
+    ok;
+maybe_refund(Escrow, Opts) ->
+    case dev_bundler_escrow:refund(Escrow, Opts) of
+        ok -> ok;
+        {ok, _} -> ok;
+        Error ->
+            ?event(bundler_short, {escrow_refund_failed, Error}),
+            ok
     end.
 
 %%% Bundling server.
@@ -222,18 +239,36 @@ server(State = #state{max_idle_time = MaxIdleTime}, Opts) ->
                 add_to_queue(
                     Item,
                     bundled_item_size(Item, Opts),
+                    none,
                     State,
                     Opts
                 ),
             server(assign_tasks(maybe_dispatch(State1)), Opts);
-        {enqueue_item, Item, BundledSize} ->
-            State1 = add_to_queue(Item, BundledSize, State, Opts),
+        {enqueue_item, Item, BundledSize} when is_integer(BundledSize) ->
+            State1 =
+                add_to_queue(Item, BundledSize, none, State, Opts),
+            server(assign_tasks(maybe_dispatch(State1)), Opts);
+        {enqueue_item, Item, Escrow} ->
+            State1 =
+                add_to_queue(
+                    Item,
+                    bundled_item_size(Item, Opts),
+                    Escrow,
+                    State,
+                    Opts
+                ),
+            server(assign_tasks(maybe_dispatch(State1)), Opts);
+        {enqueue_item, Item, BundledSize, Escrow} ->
+            State1 = add_to_queue(Item, BundledSize, Escrow, State, Opts),
             server(assign_tasks(maybe_dispatch(State1)), Opts);
         {dispatch_queue, Timestamp} ->
             ?event(bundler_short, {dispatched_queue_start, calendar:now_to_universal_time(Timestamp)}),
             server(assign_tasks(dispatch_queue(State)), Opts);
         {recover_bundle, CommittedTX, Items} ->
-            State1 = recover_bundle(CommittedTX, Items, State),
+            State1 = recover_bundle(CommittedTX, Items, [none || _ <- Items], State),
+            server(assign_tasks(State1), Opts);
+        {recover_bundle, CommittedTX, Items, Escrows} ->
+            State1 = recover_bundle(CommittedTX, Items, Escrows, State),
             server(assign_tasks(State1), Opts);
         {task_complete, WorkerPID, Task, Result} ->
             State1 = handle_task_complete(WorkerPID, Task, Result, State),
@@ -260,12 +295,12 @@ server(State = #state{max_idle_time = MaxIdleTime}, Opts) ->
 %% @doc Add an item to the queue. Update the state with the queue's total
 %% bundled byte size.
 %% Note: Item has already been verified and cached before reaching here.
-add_to_queue(Item, BundledSize, State = #state{
+add_to_queue(Item, BundledSize, Escrow, State = #state{
         queue = Queue,
         bytes = Bytes,
         dispatch_ref = DispatchRef
     }, Opts) ->
-    NewQueue = [{Item, BundledSize} | Queue],
+    NewQueue = [{Item, BundledSize, Escrow} | Queue],
     NewBytes = Bytes + BundledSize,
     ?event(bundler_short, {queueing_item, 
         {id, {explicit, hb_message:id(Item, signed, Opts)}},
@@ -323,7 +358,10 @@ dispatchable(_State) ->
 %% @doc Return the total size of a queue of items.
 queue_bytes(Items) ->
     lists:foldl(
-        fun({_Item, BundledSize}, Acc) -> Acc + BundledSize end,
+        fun
+            ({_Item, BundledSize}, Acc) -> Acc + BundledSize;
+            ({_Item, BundledSize, _Escrow}, Acc) -> Acc + BundledSize
+        end,
         0,
         Items
     ).
@@ -338,16 +376,29 @@ dispatch_queue(State = #state{queue = Queue, dispatch_ref = DispatchRef}) ->
     end,
     create_bundle(Queue, State#state{queue = [], bytes = 0, dispatch_ref = undefined}).
 
+split_queued_items(QueuedItems) ->
+    lists:foldr(
+        fun
+            ({Item, Size}, {Items, Sizes, Escrows}) ->
+                {[Item | Items], [Size | Sizes], [none | Escrows]};
+            ({Item, Size, Escrow}, {Items, Sizes, Escrows}) ->
+                {[Item | Items], [Size | Sizes], [Escrow | Escrows]}
+        end,
+        {[], [], []},
+        QueuedItems
+    ).
+
 %% @doc Create a bundle and enqueue its initial post task.
 create_bundle([], State) ->
     State;
 create_bundle(QueuedItems, State = #state{bundles = Bundles, opts = Opts}) ->
-    {Items, ItemSizes} = lists:unzip(QueuedItems),
+    {Items, ItemSizes, Escrows} = split_queued_items(QueuedItems),
     BundleID = make_ref(),
     Bundle = #bundle{
         id = BundleID,
         items = Items,
         item_sizes = ItemSizes,
+        escrows = Escrows,
         status = initializing,
         tx = undefined,
         proofs = #{},
@@ -535,32 +586,48 @@ bundle_complete(Bundle, State = #state{opts = Opts}) ->
             {elapsed_time_s, ElapsedTime}
         }
     ),
+    release_escrows(Bundle#bundle.escrows, Opts),
     run_completion_hooks(Bundle, Opts),
     State#state{bundles = maps:remove(Bundle#bundle.id, State#state.bundles)}.
+
+release_escrows(Escrows, Opts) ->
+    lists:foreach(
+        fun(Escrow) ->
+            case dev_bundler_escrow:release(Escrow, Opts) of
+                ok -> ok;
+                {ok, _} -> ok;
+                Error -> ?event(bundler_short, {escrow_release_failed, Error})
+            end
+        end,
+        Escrows
+    ).
 
 %% @doc Execute hooks for each completed bundled item and the full bundle.
 run_completion_hooks(Bundle, Opts) ->
     lists:foreach(
-        fun({Item, Size}) ->
+        fun({Item, Size, Escrow}) ->
             dev_hook:on(
                 <<"bundled-message-complete">>,
                 #{
                     <<"body">> => Item,
-                    <<"bundled-size">> => Size
+                    <<"bundled-size">> => Size,
+                    <<"escrow">> => Escrow
                 },
                 Opts
             )
         end,
-        lists:zip(
+        lists:zip3(
             lists:reverse(Bundle#bundle.items),
-            lists:reverse(Bundle#bundle.item_sizes)
+            lists:reverse(Bundle#bundle.item_sizes),
+            lists:reverse(Bundle#bundle.escrows)
         )
     ),
     dev_hook:on(
         <<"bundle-complete">>,
         #{
             <<"body">> => Bundle#bundle.tx,
-            <<"bundled-size">> => bundle_size(Bundle#bundle.tx, Opts)
+            <<"bundled-size">> => bundle_size(Bundle#bundle.tx, Opts),
+            <<"escrows">> => Bundle#bundle.escrows
         },
         Opts
     ).
@@ -591,12 +658,13 @@ bundle_size(CommittedTX, Opts) ->
     end.
 
 %% @doc Recover a single bundle and enqueue any follow-up work.
-recover_bundle(CommittedTX, Items, State = #state{opts = Opts}) ->
+recover_bundle(CommittedTX, Items, Escrows, State = #state{opts = Opts}) ->
     BundleID = make_ref(),
     Bundle = #bundle{
         id = BundleID,
         items = Items,
         item_sizes = [bundled_item_size(Item, Opts) || Item <- Items],
+        escrows = Escrows,
         status = tx_posted,
         tx = CommittedTX,
         proofs = #{},

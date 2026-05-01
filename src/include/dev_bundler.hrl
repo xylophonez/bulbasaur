@@ -30,6 +30,7 @@
     id,
     items,
     item_sizes,
+    escrows,
     status,
     tx,
     proofs,

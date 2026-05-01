@@ -1,8 +1,9 @@
 # Bulbasaur HyperBEAM Node
 
-This checkout is configured to run a paid process-execution node using
-`p4@1.0` as the request/response hook, `simple-pay@1.0` as the pricing device,
-and `process-ledger@1.0` as the adapter to a local AO-token sub-ledger.
+This checkout is configured to run a paid process-execution and paid bundler
+node using `p4@1.0` as the request/response hook, `simple-pay@1.0` for static
+route pricing, `metering@1.0` for dynamic bundler byte pricing, and
+`process-ledger@1.0` as the adapter to a local AO-token sub-ledger.
 
 Start it with:
 
@@ -31,7 +32,17 @@ This branch adds the following Bulbasaur-specific pieces:
   ledger.
 - `src/dev_process_ledger.erl`: HyperBEAM device registered as
   `process-ledger@1.0`. It lets `p4@1.0` read balances from the local ledger
-  process and push operator-signed charge messages back into it.
+  process and push operator-signed charge, reserve, release, and refund
+  messages back into it.
+- `src/dev_bundler_escrow.erl`: bundler escrow helper. It quotes uploads with
+  `metering@1.0`, reserves uploader funds before the item is cached/queued,
+  releases funds to the operator after `bundle_complete`, and refunds if the
+  pre-bundle cache step fails after a reservation.
+- `src/dev_bundler.erl`, `src/dev_bundler_cache.erl`, and
+  `src/dev_bundler_recovery.erl`: extend Sam's metered bundler flow with
+  reservation metadata, cache/recovery support, and completion-time release.
+- `scripts/hyper-token-p4.lua`: extends the local token ledger with
+  reservation state for `reserve`, `release`, and `refund`.
 - `src/hb_opts.erl`: preloads `ao-payment@1.0` so the verifier device is
   available through the normal HyperBEAM device map, and preloads
   `process-ledger@1.0` for the p4 ledger adapter.
@@ -103,8 +114,36 @@ Defaults:
 - Operator wallet: `bulbasaur-wallet.json`, override with `HB_KEY=/path/to/wallet.json`.
 - AO root token process: `0syT13r0s0tgPmIed95bJnuSqaD29HQNN8D3ElLSrsc`, override with `BULBASAUR_AO_TOKEN=<process-id>`.
 - Process route price: `1` AO base unit, override with `BULBASAUR_PROCESS_PRICE=25`.
+- Bundler upload byte price: `1162726` AO base units per bundled byte,
+  override with `BULBASAUR_BUNDLER_BYTE_PRICE=2`. The default approximates
+  `$0.0025797/KiB` at `$2.60/AO` plus a 20% operator premium.
+- Bundler item dispatch threshold: `1000` items by default, override with
+  `BULBASAUR_BUNDLER_MAX_ITEMS=1` for local smoke testing.
+- Bundler dispatch timer: the first queued item starts the bundler's
+  `bundler-max-bundle-dispatch-delay`, which defaults to `30000` ms in
+  `dev_bundler`. This is separate from `BULBASAUR_BUNDLER_MAX_IDLE_MS`, which
+  controls bundler server idle shutdown.
 - Paid route template: `/.*~process@1.0/.*`.
+- Paid bundler route template: `/~bundler@1.0/tx`.
 - Generic non-process routes are free because `simple-pay-price` is set to `0`.
+  Bundler uploads are priced dynamically by `metering@1.0`, not by the static
+  route price.
+
+Bundler payment flow:
+
+1. The uploader submits a signed ANS-104 data item to `/~bundler@1.0/tx`.
+2. The bundler calculates the bundled byte size and asks `metering@1.0` for a
+   quote.
+3. `process-ledger@1.0` reserves the quoted AO base units from the uploader in
+   the local ledger process before the item is cached or queued.
+4. After the bundle tx is posted and chunks/proofs are seeded,
+   `bundle_complete` releases the reservation to the operator.
+5. If the reservation succeeds but pre-queue cache writing fails, the bundler
+   attempts to refund the reservation.
+
+`bundle_complete` is the bundler's "posted and seeded" signal. It is not an
+Arweave finality confirmation, but it is the point at which the operator has
+completed the bundling job.
 
 The important token selector is not a knob on `p4@1.0`. It is the ledger
 process definition's `token` field. In this checkout, `BULBASAUR_AO_TOKEN`

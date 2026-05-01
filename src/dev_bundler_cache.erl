@@ -12,6 +12,8 @@
 -module(dev_bundler_cache).
 -export([
     write_item/2,
+    write_item/3,
+    get_item_escrow/2,
     write_tx/3,
     complete_tx/2,
     load_bundle_states/1,
@@ -32,12 +34,19 @@ item_id(Item, Opts) when is_map(Item) ->
 
 %% @doc Write a data item to cache and create its bundler pseudopath.
 write_item(Item, Opts) when is_map(Item) ->
+    write_item(Item, none, Opts).
+
+write_item(Item, Escrow, Opts) when is_map(Item) ->
     % Write the actual item to cache
     {ok, _} = hb_cache:write(Item, Opts),
     % Use the committed (structured) item for path generation
     Path = item_path(Item, Opts),
     % Create pseudopath with empty bundle reference
-    write_pseudopath(Path, <<>>, Opts).
+    ok = write_pseudopath(Path, <<>>, Opts),
+    case Escrow of
+        none -> ok;
+        _ -> write_pseudopath(item_escrow_path(Item, Opts), Escrow, Opts)
+    end.
 
 %% @doc Link a data item to a bundle TX.
 link_item_to_tx(Item, TX, Opts) when is_map(Item) and is_map(TX) ->
@@ -53,6 +62,14 @@ get_item_bundle(Item, Opts) when is_map(Item) ->
         not_found -> not_found
     end.
 
+get_item_escrow(ItemID, Opts) when is_binary(ItemID) ->
+    case read_pseudopath(item_escrow_path(ItemID, Opts), Opts) of
+        {ok, Value} -> Value;
+        not_found -> none
+    end;
+get_item_escrow(Item, Opts) when is_map(Item) ->
+    get_item_escrow(item_id(Item, Opts), Opts).
+
 %% @doc Construct the pseudopath for an item's bundle reference.
 %% Item should be a structured message.
 item_path(Item, Opts) when is_map(Item) ->
@@ -63,6 +80,16 @@ item_path(ItemID, _Opts) when is_binary(ItemID) ->
         <<"item">>,
         ItemID,
         <<"bundle">>
+    ]).
+
+item_escrow_path(Item, Opts) when is_map(Item) ->
+    item_escrow_path(item_id(Item, Opts), Opts);
+item_escrow_path(ItemID, _Opts) when is_binary(ItemID) ->
+    hb_path:to_binary([
+        ?BUNDLER_PREFIX,
+        <<"item">>,
+        ItemID,
+        <<"escrow">>
     ]).
 
 %%% TX/Bundle operations

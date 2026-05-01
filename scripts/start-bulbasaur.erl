@@ -4,6 +4,27 @@ Price =
         RawPrice -> list_to_integer(RawPrice)
     end.
 
+% $0.0025797/KiB at $2.60/AO, plus a 20% operator premium.
+DefaultBundlerBytePrice = 1162726.
+
+BundlerBytePrice =
+    case os:getenv("BULBASAUR_BUNDLER_BYTE_PRICE") of
+        false -> DefaultBundlerBytePrice;
+        RawBundlerBytePrice -> list_to_integer(RawBundlerBytePrice)
+    end.
+
+BundlerMaxItems =
+    case os:getenv("BULBASAUR_BUNDLER_MAX_ITEMS") of
+        false -> 1000;
+        RawBundlerMaxItems -> list_to_integer(RawBundlerMaxItems)
+    end.
+
+BundlerMaxIdleTime =
+    case os:getenv("BULBASAUR_BUNDLER_MAX_IDLE_MS") of
+        false -> 300000;
+        RawBundlerMaxIdleTime -> list_to_integer(RawBundlerMaxIdleTime)
+    end.
+
 Port =
     case os:getenv("HB_PORT") of
         false -> 8734;
@@ -89,12 +110,38 @@ LedgerProcessID =
 LedgerCachePath = hb_util:human_id(LedgerCacheID).
 LedgerPath = <<"/", LedgerProcessID/binary, "~process@1.0">>.
 
-Processor =
+StaticProcessor =
     #{
         <<"device">> => <<"p4@1.0">>,
         <<"ledger-device">> => <<"process-ledger@1.0">>,
         <<"pricing-device">> => <<"simple-pay@1.0">>,
+        <<"bundler-pricing-device">> => <<"metering@1.0">>,
         <<"ledger-path">> => LedgerPath
+    }.
+
+MeteredProcessor =
+    StaticProcessor#{
+        <<"pricing-device">> => <<"metering@1.0">>
+    }.
+
+Processor =
+    StaticProcessor#{
+        <<"device">> => #{
+            request =>
+                fun(_Base, Raw, NodeMsg) ->
+                    case dev_p4:request(StaticProcessor, Raw, NodeMsg) of
+                        {ok, _} -> dev_p4:request(MeteredProcessor, Raw, NodeMsg);
+                        Error -> Error
+                    end
+                end,
+            response =>
+                fun(_Base, Raw, NodeMsg) ->
+                    case dev_p4:response(StaticProcessor, Raw, NodeMsg) of
+                        {ok, _} -> dev_p4:response(MeteredProcessor, Raw, NodeMsg);
+                        Error -> Error
+                    end
+                end
+        }
     }.
 
 Opts =
@@ -111,10 +158,19 @@ Opts =
         <<"p4-recipient">> => Operator,
         simple_pay_price => 0,
         <<"simple-pay-price">> => 0,
+        bundler_max_items => BundlerMaxItems,
+        <<"bundler-max-items">> => BundlerMaxItems,
+        bundler_max_idle_time => BundlerMaxIdleTime,
+        <<"bundler-max-idle-time">> => BundlerMaxIdleTime,
+        <<"metering-rates">> => #{
+            <<"arweave-bytes">> => BundlerBytePrice,
+            <<"beam-reductions">> => 0
+        },
         p4_non_chargable_routes => [
             #{ <<"template">> => <<"/*~node-process@1.0/*">> },
             #{ <<"template">> => << LedgerPath/binary, "/*" >> },
             #{ <<"template">> => <<"/~ao-payment@1.0/*">> },
+            #{ <<"template">> => <<"/~bundler@1.0/*">> },
             #{ <<"template">> => <<"/~p4@1.0/balance">> },
             #{ <<"template">> => <<"/~meta@1.0/*">> }
         ],
@@ -122,6 +178,7 @@ Opts =
             #{ <<"template">> => <<"/*~node-process@1.0/*">> },
             #{ <<"template">> => << LedgerPath/binary, "/*" >> },
             #{ <<"template">> => <<"/~ao-payment@1.0/*">> },
+            #{ <<"template">> => <<"/~bundler@1.0/*">> },
             #{ <<"template">> => <<"/~p4@1.0/balance">> },
             #{ <<"template">> => <<"/~meta@1.0/*">> }
         ],
@@ -138,6 +195,10 @@ Opts =
                 #{
                     <<"template">> => <<"/.*~process@1.0/.*">>,
                     <<"price">> => Price
+                },
+                #{
+                    <<"template">> => <<"/~bundler@1.0/tx">>,
+                    <<"price">> => 0
                 }
             ]
         },
@@ -146,6 +207,10 @@ Opts =
                 #{
                     <<"template">> => <<"/.*~process@1.0/.*">>,
                     <<"price">> => Price
+                },
+                #{
+                    <<"template">> => <<"/~bundler@1.0/tx">>,
+                    <<"price">> => 0
                 }
             ]
         },
@@ -176,6 +241,9 @@ io:format(
     "Operator: ~s~n"
     "Wallet: ~s~n"
     "Process route price: ~p AO base unit(s)~n"
+    "Bundler byte price: ~p AO base unit(s) per bundled byte~n"
+    "Bundler max items: ~p~n"
+    "Bundler max idle time: ~p ms~n"
     "AO root token: ~s~n"
     "Ledger process file: ~s~n"
     "Ledger AO funding account: ~s~n"
@@ -186,6 +254,9 @@ io:format(
         Operator,
         WalletPath,
         Price,
+        BundlerBytePrice,
+        BundlerMaxItems,
+        BundlerMaxIdleTime,
         AOToken,
         LedgerProcPath,
         LedgerProcessID,

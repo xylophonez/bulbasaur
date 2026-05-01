@@ -14,7 +14,7 @@
 %%% `metering-rates' in the node message as a map of resource name to AO token
 %%% units per resource unit.
 -module(dev_metering).
--export([info/1, estimate/3, price/3, is_active/0, consume/3]).
+-export([info/1, estimate/3, quote/3, price/3, is_active/0, consume/3]).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -27,6 +27,7 @@ info(_) ->
         exports =>
             [
                 <<"estimate">>,
+                <<"quote">>,
                 <<"price">>
             ]
     }.
@@ -43,22 +44,32 @@ estimate(_Base, _EstimateReq, _Opts) ->
     ),
     {ok, 0}.
 
+%% @doc Price a known set of resources without opening a metering session.
+quote(_Base, Req, Opts) ->
+    Resources =
+        case hb_maps:get(<<"resources">>, Req, undefined, Opts) of
+            Map when is_map(Map) ->
+                Map;
+            undefined ->
+                Resource = hb_maps:get(<<"resource">>, Req, undefined, Opts),
+                Quantity = hb_maps:get(<<"quantity">>, Req, 0, Opts),
+                case Resource of
+                    undefined -> #{};
+                    _ -> #{ hb_ao:normalize_key(Resource) => hb_util:int(Quantity) }
+                end
+        end,
+    {ok, price_resources(Resources, Opts)}.
+
 %% @doc Close the metering session and calculate the final AO token price.
 price(_Base, _PriceReq, Opts) ->
-    Rates = hb_opts:get(<<"metering-rates">>, #{}, Opts),
-    Price =
-        maps:fold(
-            fun(Resource, Amount, Acc) ->
-                Rate = hb_util:int(hb_maps:get(Resource, Rates, 0, Opts)),
-                Acc + (Amount * Rate)
-            end,
-            0,
-            maps:get(
-                meters,
-                meter_reductions(erlang:get(?METERING_KEY)),
-                #{}
-            )
+    Price = price_resources(
+        maps:get(
+            meters,
+            meter_reductions(erlang:get(?METERING_KEY)),
+            #{}
         ),
+        Opts
+    ),
     erlang:erase(?METERING_KEY),
     {ok, Price}.
 
@@ -110,6 +121,17 @@ add_meter(Resource, Amount, State) ->
             }
     }.
 
+price_resources(Resources, Opts) ->
+    Rates = hb_opts:get(<<"metering-rates">>, #{}, Opts),
+    maps:fold(
+        fun(Resource, Amount, Acc) ->
+            Rate = hb_util:int(hb_maps:get(Resource, Rates, 0, Opts)),
+            Acc + (hb_util:int(Amount) * Rate)
+        end,
+        0,
+        Resources
+    ).
+
 %%% Tests
 
 %% @doc Metering outside an active session is a no-op.
@@ -131,6 +153,27 @@ consume_price_test() ->
     {ok, 0} = hb_ao:resolve(Metering, #{ <<"path">> => <<"estimate">> }, Opts),
     ok = consume(<<"arweave-bytes">>, 5, Opts),
     {ok, 15} = hb_ao:resolve(Metering, #{ <<"path">> => <<"price">> }, Opts).
+
+quote_price_test() ->
+    Opts = #{
+        <<"store">> => hb_test_utils:test_store(),
+        <<"metering-rates">> => #{
+            <<"arweave-bytes">> => 3,
+            ?BEAM_REDUCTIONS => 0
+        }
+    },
+    Metering = #{ <<"device">> => <<"metering@1.0">> },
+    ?assertEqual(
+        {ok, 15},
+        hb_ao:resolve(
+            Metering,
+            #{
+                <<"path">> => <<"quote">>,
+                <<"resources">> => #{ <<"arweave-bytes">> => 5 }
+            },
+            Opts
+        )
+    ).
 
 %% @doc Resource consumption is not exposed as an AO-Core key.
 consume_is_not_device_key_test() ->
