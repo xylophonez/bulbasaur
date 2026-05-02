@@ -102,11 +102,11 @@ flowchart LR
     Buyer -->|"signed ANS-104 bundler upload"| P4
     P4 -->|"select bundler pricing"| Router
     Router -->|"quote and final byte price"| Meter
-    P4 -->|"charge uploader; credit node account"| PL
+    P4 -->|"charge uploader and credit node account"| PL
     P4 -->|"accepted upload"| Bundler
     Bundler -->|"post tx and seed chunks/proofs"| AR
     Bundler -->|"bundled-message-complete hook"| Settle
-    Settle -->|"charge node account; credit beneficiary"| PL
+    Settle -->|"charge node account and credit beneficiary"| PL
     PL --> Ledger
     Ledger --> Beneficiary
 ```
@@ -174,14 +174,14 @@ sequenceDiagram
         B->>M: consume(arweave-bytes, bundled item size)
         B-->>P4: 200 accepted with item id
         P4->>M: price(response)
-        P4->>PL: charge uploader; credit node account
+        P4->>PL: charge uploader and credit node account
         PL->>L: operator-signed charge
         B->>AR: post bundle transaction
         B->>AR: seed chunks/proofs
         AR-->>B: 200 for tx and all required chunks/proofs
         B->>S: bundled-message-complete hook
         S->>M: quote(arweave-bytes, bundled item size)
-        S->>PL: charge node account; credit beneficiary
+        S->>PL: charge node account and credit beneficiary
         PL->>L: operator-signed settlement charge
         L-->>BEN: beneficiary local balance increases
     else insufficient local balance
