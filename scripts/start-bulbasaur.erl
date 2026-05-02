@@ -282,6 +282,7 @@ io:format(
     "Bundler byte price: ~p AO base unit(s)~n"
     "AO root token: ~s~n"
     "Ledger process file: ~s~n"
+    "Ledger process ID: ~s~n"
     "AO deposit address: ~s~n"
     "Ledger route: ~s~n"
     "Ledger local cache ID: ~s~n~n",
@@ -294,6 +295,7 @@ io:format(
         BundlerBytePrice,
         AOToken,
         LedgerProcPath,
+        LedgerProcessID,
         Operator,
         LedgerPath,
         LedgerCachePath

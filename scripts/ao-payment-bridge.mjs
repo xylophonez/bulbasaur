@@ -3,7 +3,6 @@ import process from "node:process";
 
 const defaults = {
   token: "0syT13r0s0tgPmIed95bJnuSqaD29HQNN8D3ElLSrsc",
-  ledger: "aqu6pW4GemwbDguS-rtCEBT_CJqsLYAWcmAULnZR-cE",
   node: "http://localhost:8734",
   quantity: "1",
 };
@@ -16,7 +15,7 @@ function usage() {
       "",
       "Options:",
       `  --token <id>              AO token process (default ${defaults.token})`,
-      `  --ledger <id>             Bulbasaur ledger process (default ${defaults.ledger})`,
+      "  --ledger <id>             Bulbasaur ledger process; defaults to the node config",
       `  --node <url>              Bulbasaur node URL (default ${defaults.node})`,
       `  --quantity <raw-units>    AO raw units transferred (default ${defaults.quantity})`,
       "  --recipient <addr>        local ledger account to credit; defaults to sender",
@@ -64,12 +63,14 @@ const args = parseArgs(process.argv);
 const base = args.node.replace(/\/$/, "");
 const params = new URLSearchParams({
   token: args.token,
-  ledger: args.ledger,
   "message-id": args.messageId,
   slot: args.slot,
   sender: args.sender,
   quantity: args.quantity,
 });
+if (args.ledger) {
+  params.set("ledger", args.ledger);
+}
 if (args.recipient) {
   params.set("recipient", args.recipient);
 }

@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Standalone paid AO bundler upload tests for Bulbasaur.",
   "scripts": {
-    "paid-upload": "node ./paid-bundler-upload.mjs"
+    "paid-upload": "node ./paid-bundler-upload.mjs",
+    "find-slot": "node ./find-ao-assignment-slot.mjs"
   },
   "dependencies": {
     "@dha-team/arbundles": "^1.0.4"

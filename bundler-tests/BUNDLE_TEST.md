@@ -78,6 +78,8 @@ Example startup lines to look for:
 Bulbasaur paid-process node started at http://localhost:8734/
 Operator: <node-wallet-address>
 Bundler beneficiary: <node-wallet-address>
+Ledger process ID: <ledger-process-id>
+AO deposit address: <node-wallet-address>
 Ledger route: /ledger~node-process@1.0
 ```
 
@@ -137,7 +139,79 @@ Arweave. The individual data item may take longer to appear at
 `https://arweave.net/<item-id>` because gateway indexing of bundled data items
 lags the bundle transaction.
 
-## 7. Capture A Log
+## 7. Real AO Deposit/Import Variant
+
+The default command in step 4 uses `BULBASAUR_INITIAL_BALANCE_*` to pre-fund the
+local ledger for a fast paid-upload test. To also test the real
+`ao-payment@1.0` import device, start Bulbasaur without those two env vars:
+
+```sh
+HB_KEY="$NODE_WALLET" \
+HB_PORT="$HB_PORT" \
+BULBASAUR_BUNDLER_MAX_ITEMS=1 \
+./scripts/start-bulbasaur.sh
+```
+
+Copy the printed `Ledger process ID` and `AO deposit address`, then submit a
+small AO transfer from the uploader wallet to the node deposit address:
+
+```sh
+export TOKEN=0syT13r0s0tgPmIed95bJnuSqaD29HQNN8D3ElLSrsc
+export LEDGER_ID=replace-with-printed-ledger-process-id
+export DEPOSIT_ADDRESS=replace-with-printed-ao-deposit-address
+export QUANTITY=5000000000
+
+HB_PORT=19110 \
+TOKEN="$TOKEN" \
+LEDGER="$LEDGER_ID" \
+DEPOSIT_ADDRESS="$DEPOSIT_ADDRESS" \
+LOCAL_RECIPIENT="$UPLOADER_ADDRESS" \
+WALLET="$UPLOADER_WALLET" \
+QUANTITY="$QUANTITY" \
+rebar3 shell --apps hackney \
+  --eval 'file:script("scripts/submit-ao-transfer-direct.erl"), init:stop().' \
+  2>&1 | tee /tmp/bulbasaur-ao-transfer.log
+```
+
+The transfer output includes `Message: <message-id>`. Extract it and find its AO
+assignment slot on the root token schedule:
+
+```sh
+export MESSAGE_ID="$(awk '/^Message: / { print $2; exit }' /tmp/bulbasaur-ao-transfer.log)"
+export SLOT="$(
+  node bundler-tests/find-ao-assignment-slot.mjs \
+    --token "$TOKEN" \
+    --message-id "$MESSAGE_ID"
+)"
+echo "$MESSAGE_ID"
+echo "$SLOT"
+```
+
+Import the verified AO transfer into the local Bulbasaur ledger:
+
+```sh
+node scripts/ao-payment-bridge.mjs \
+  --node "http://localhost:$HB_PORT" \
+  --token "$TOKEN" \
+  --ledger "$LEDGER_ID" \
+  --message-id "$MESSAGE_ID" \
+  --slot "$SLOT" \
+  --sender "$UPLOADER_ADDRESS" \
+  --recipient "$UPLOADER_ADDRESS" \
+  --quantity "$QUANTITY"
+```
+
+Confirm the imported local balance:
+
+```sh
+curl "http://localhost:$HB_PORT/ledger~node-process@1.0/now/balance/$UPLOADER_ADDRESS"
+```
+
+Then run the same paid upload command from step 5. In this mode, the upload is
+spending balance imported by `ao-payment@1.0`, not balance seeded by
+`BULBASAUR_INITIAL_BALANCE_*`.
+
+## 8. Capture A Log
 
 To save the full run output:
 
@@ -151,7 +225,7 @@ TEXT_PAYLOAD="Bulbasaur paid AO upload $(date -Iseconds)-$RANDOM" \
   | tee "bundler-tests/logs/paid-upload-$(date +%Y%m%d-%H%M%S).log"
 ```
 
-## 8. Common Failures
+## 9. Common Failures
 
 - `402`: the uploader does not have enough balance in the local Bulbasaur AO
   ledger. Import an AO deposit through `ao-payment@1.0`, or restart the local

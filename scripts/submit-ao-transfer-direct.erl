@@ -20,6 +20,16 @@ Ledger =
         RawLedger -> list_to_binary(RawLedger)
     end.
 
+DepositAddress =
+    case os:getenv("DEPOSIT_ADDRESS") of
+        false ->
+            case os:getenv("RECIPIENT") of
+                false -> Ledger;
+                RawRecipient -> list_to_binary(RawRecipient)
+            end;
+        RawDepositAddress -> list_to_binary(RawDepositAddress)
+    end.
+
 Quantity =
     case os:getenv("QUANTITY") of
         false -> <<"1">>;
@@ -48,6 +58,11 @@ OutPath =
 
 Wallet = hb:wallet(WalletPath).
 Sender = hb_util:human_id(ar_wallet:to_address(Wallet)).
+LocalRecipient =
+    case os:getenv("LOCAL_RECIPIENT") of
+        false -> Sender;
+        RawLocalRecipient -> list_to_binary(RawLocalRecipient)
+    end.
 Target = hb_util:native_id(Token).
 Anchor = crypto:strong_rand_bytes(32).
 Tags = [
@@ -57,9 +72,9 @@ Tags = [
     {<<"Content-Type">>, <<"text/plain">>},
     {<<"SDK">>, <<"bulbasaur">>},
     {<<"Action">>, <<"Transfer">>},
-    {<<"Recipient">>, Ledger},
+    {<<"Recipient">>, DepositAddress},
     {<<"Quantity">>, Quantity},
-    {<<"X-HB-Recipient">>, Sender}
+    {<<"X-HB-Recipient">>, LocalRecipient}
 ].
 Unsigned = ar_bundles:new_item(Target, Anchor, Tags, <<"bulbasaur">>).
 Signed = ar_bundles:sign_item(Unsigned, Wallet).
@@ -73,10 +88,12 @@ io:format(
     "Submit URL: ~s~n"
     "Token: ~s~n"
     "Ledger: ~s~n"
+    "Deposit address: ~s~n"
     "Sender: ~s~n"
+    "Local recipient: ~s~n"
     "Quantity: ~s~n"
     "Message: ~s~n",
-    [SubmitURL, Token, Ledger, Sender, Quantity, MessageID]
+    [SubmitURL, Token, Ledger, DepositAddress, Sender, LocalRecipient, Quantity, MessageID]
 ).
 
 case OutPath of

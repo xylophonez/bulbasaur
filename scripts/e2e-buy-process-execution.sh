@@ -8,6 +8,7 @@ MAINNET_URL="${MAINNET_URL:-https://state.forward.computer}"
 LEGACY_MU_URL="${LEGACY_MU_URL:-https://mu.ao-testnet.xyz}"
 TOKEN="${TOKEN:-0syT13r0s0tgPmIed95bJnuSqaD29HQNN8D3ElLSrsc}"
 LEDGER="${LEDGER:-aqu6pW4GemwbDguS-rtCEBT_CJqsLYAWcmAULnZR-cE}"
+DEPOSIT_ADDRESS="${DEPOSIT_ADDRESS:?Set DEPOSIT_ADDRESS to the Bulbasaur AO deposit address printed by scripts/start-bulbasaur.sh}"
 WALLET="${WALLET:?Set WALLET=/path/to/arweave-keyfile.json}"
 QUANTITY="${QUANTITY:-1}"
 PAYMENT_TIMEOUT="${PAYMENT_TIMEOUT:-120}"
@@ -16,6 +17,7 @@ echo "Buying one paid process execution"
 echo "Node:    $NODE_URL"
 echo "MU:      $LEGACY_MU_URL"
 echo "Ledger:  $LEDGER"
+echo "Deposit: $DEPOSIT_ADDRESS"
 echo "Cost:    $QUANTITY armstrong(s)"
 echo "Timeout: ${PAYMENT_TIMEOUT}s"
 
@@ -24,7 +26,8 @@ trap 'rm -f "$TRANSFER_ITEM"' EXIT
 
 echo "Creating signed AO transfer data item..."
 TRANSFER_LOG="$(
-  TOKEN="$TOKEN" LEDGER="$LEDGER" WALLET="$WALLET" QUANTITY="$QUANTITY" \
+  TOKEN="$TOKEN" LEDGER="$LEDGER" DEPOSIT_ADDRESS="$DEPOSIT_ADDRESS" \
+  WALLET="$WALLET" QUANTITY="$QUANTITY" \
   SUBMIT=false OUT="$TRANSFER_ITEM" \
   rebar3 shell --apps hackney \
     --eval 'file:script("scripts/submit-ao-transfer-direct.erl"), init:stop().'
