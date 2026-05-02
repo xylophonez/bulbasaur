@@ -44,8 +44,10 @@ export UPLOADER_ADDRESS=replace-with-uploader-wallet-address
 export HB_PORT=8734
 ```
 
-`UPLOADER_ADDRESS` is the address derived from `UPLOADER_WALLET`, without a
-leading `@`.
+`UPLOADER_ADDRESS` is the plain Arweave wallet address derived from
+`UPLOADER_WALLET`, for example
+`aYDOU6kEcE3lK7aA-gTmUKHTbLlQnZZXWpv1_i_Uq1U`. Do not include an `ar://`
+prefix or any surrounding quotes in the exported value.
 
 ## 4. Start Bulbasaur
 
