@@ -33,7 +33,7 @@ flow documented in `BULBASAUR.md`; then start the node without the
 ```sh
 git clone https://github.com/xylophonez/bulbasaur.git
 cd bulbasaur
-git checkout feat/local-ledger-bundler-payments
+git checkout feat/bundler-optimistic-cache
 rebar3 compile
 cd bundler-tests
 npm install
@@ -121,16 +121,21 @@ A successful run should include:
 
 ```text
 HTTP status              200 OK
+Raw HTTP status          200 OK
+Raw matches upload       true
 Uploader delta           -<charged-ao-base-units> base units
 Bundle tx found: <txid>; status=complete
 Beneficiary balance      <credited-ao-base-units>
 Paid POST                accepted
+Optimistic raw read      matched uploaded text
 Bundle status            complete
 Arweave bundle           https://arweave.net/tx/<txid>
 ```
 
-The item should also be readable from the Bulbasaur node immediately after the
-paid POST because the bundler writes accepted uploads into the local cache. Once
+The script proves immediate local retrieval by calling
+`/~arweave@2.9/raw=<item-id>` immediately after the paid POST and comparing the
+returned bytes to the uploaded text. This should happen before the bundle txid
+appears, because the bundler writes accepted uploads into the local cache. Once
 the bundle reaches `complete`, Bulbasaur runs a mempool-copycat pass for that
 bundle tx so pending Arweave offset reads are available before gateway indexing
 catches up.

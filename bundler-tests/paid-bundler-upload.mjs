@@ -3,8 +3,9 @@
 Standalone paid Bulbasaur bundler flow test.
 
 The script signs a text payload as an ANS-104 data item, posts the raw item to
-Bulbasaur's paid bundler route, watches the local ledger debit, waits for a
-bundle txid/status in the bundler cache, and optionally probes an Arweave
+Bulbasaur's paid bundler route, immediately reads the uploaded payload through
+Bulbasaur's optimistic Arweave raw cache, watches the local ledger debit, waits
+for a bundle txid/status in the bundler cache, and optionally probes an Arweave
 gateway for the posted bundle transaction.
 */
 
@@ -179,6 +180,18 @@ async function fetchText(url, options = {}, timeoutMs = 30000) {
   }
 }
 
+async function fetchBytes(url, options = {}, timeoutMs = 30000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    const bytes = Buffer.from(await res.arrayBuffer());
+    return { res, bytes };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function tryJson(text) {
   try {
     return JSON.parse(text);
@@ -200,6 +213,17 @@ function cleanCacheText(text) {
       : String(text);
   const cleaned = raw.trim().replace(/^"|"$/g, "");
   return isHtml(cleaned) ? "" : cleaned;
+}
+
+function bodyBytesFromResponse(res, bytes) {
+  const text = bytes.toString("utf8");
+  const contentType = res.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) return bytes;
+  const parsed = tryJson(text);
+  if (parsed && typeof parsed === "object" && "body" in parsed) {
+    return Buffer.from(String(parsed.body), "utf8");
+  }
+  return bytes;
 }
 
 function htmlTitle(text) {
@@ -291,6 +315,46 @@ async function readBundlerCache(base, readPath) {
   );
   if (!res.ok) return "";
   return cleanCacheText(text);
+}
+
+async function readOptimisticRaw(base, itemId, expectedBytes) {
+  const urls = [
+    endpoint(base, `/~arweave@2.9/raw=${itemId}`),
+    endpoint(base, `/~arweave@2.9/raw/${itemId}`),
+  ];
+  const attempts = [];
+  for (const rawUrl of urls) {
+    const url = new URL(rawUrl);
+    url.searchParams.set("_", `${Date.now()}-${Math.random()}`);
+    const { res, bytes } = await fetchBytes(
+      url,
+      {
+        method: "GET",
+        headers: {
+          accept: "text/plain, application/octet-stream, */*",
+          "cache-control": "no-cache, no-store",
+        },
+      },
+      30000,
+    ).catch((err) => ({
+      res: { ok: false, status: "fetch-error", statusText: err.message, headers: new Headers() },
+      bytes: Buffer.from(err.message),
+    }));
+    const bodyBytes = bodyBytesFromResponse(res, bytes);
+    const text = bodyBytes.toString("utf8");
+    const match = res.ok && Buffer.compare(bodyBytes, expectedBytes) === 0;
+    attempts.push({
+      url: url.toString(),
+      status: res.status,
+      statusText: res.statusText || "",
+      contentType: res.headers.get("content-type") || "",
+      bytes: bodyBytes.length,
+      preview: isHtml(text) ? `HTML '${htmlTitle(text) || "untitled"}'` : text.slice(0, 300),
+      match,
+    });
+    if (match) return { ok: true, attempts, ...attempts.at(-1) };
+  }
+  return { ok: false, attempts, ...attempts.at(-1) };
 }
 
 function uploadResultFrom(headers, text) {
@@ -460,8 +524,26 @@ async function main() {
     console.warn(`Warning: response id ${result.id} differs from locally calculated id ${item.id}`);
   }
 
+  logStep("5. Immediate optimistic raw retrieval from Bulbasaur");
+  const optimistic = await readOptimisticRaw(node, item.id, Buffer.from(text, "utf8"));
+  for (const attempt of optimistic.attempts) {
+    logKV("Raw URL", attempt.url);
+    logKV("Raw HTTP status", `${attempt.status} ${attempt.statusText}`.trim());
+    logKV("Raw content-type", attempt.contentType || "(none)");
+    logKV("Raw bytes", attempt.bytes);
+    logKV("Raw matches upload", String(attempt.match));
+    console.log("Raw preview:");
+    console.log(attempt.preview);
+    if (attempt.match) break;
+  }
+  if (!optimistic.ok) {
+    throw new Error(
+      "Paid upload was accepted, but Bulbasaur could not immediately retrieve the uploaded bytes via ~arweave@2.9/raw=<item-id>",
+    );
+  }
+
   if (ledgerRoute) {
-    logStep("5. Local AO ledger balances immediately after POST");
+    logStep("6. Local AO ledger balances immediately after POST");
     const afterPostUploader = await readBalance(node, ledgerRoute, address);
     logKV("Uploader balance", afterPostUploader?.ok ? afterPostUploader.value : JSON.stringify(afterPostUploader));
     if (beforeUploaderBalance?.ok && afterPostUploader?.ok) {
@@ -470,7 +552,7 @@ async function main() {
     }
   }
 
-  logStep("6. Poll HyperBEAM bundler cache for bundle txid/status");
+  logStep("7. Poll HyperBEAM bundler cache for bundle txid/status");
   const bundle = await pollForBundle(node, item.id, timeoutMs, pollMs);
   logKV("Cache item path", bundle.bundlePath);
   logKV("Bundle txid", bundle.txid || "(not found)");
@@ -486,7 +568,7 @@ async function main() {
   }
 
   if (ledgerRoute) {
-    logStep("7. Local AO ledger balances after bundle completion hook");
+    logStep("8. Local AO ledger balances after bundle completion hook");
     const finalUploader = await readBalance(node, ledgerRoute, address);
     logKV("Uploader balance", finalUploader?.ok ? finalUploader.value : JSON.stringify(finalUploader));
     if (args.beneficiary) {
@@ -500,7 +582,7 @@ async function main() {
   }
 
   if (!args.noGateway) {
-    logStep("8. Poll Arweave gateway visibility");
+    logStep("9. Poll Arweave gateway visibility");
     const bundleVisible = await pollGateway(args.gateway, bundle.txid, "Bundle tx", timeoutMs, pollMs, {
       acceptPending: true,
     });
@@ -530,6 +612,7 @@ async function main() {
 
   logStep("Result");
   logKV("Paid POST", "accepted");
+  logKV("Optimistic raw read", "matched uploaded text");
   logKV("Item id", item.id);
   logKV("Bundle txid", bundle.txid);
   logKV("Bundle status", bundle.status);
