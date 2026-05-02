@@ -16,6 +16,7 @@
 -module(dev_metering).
 -export([info/1, estimate/3, price/3, quote/3, is_active/0, consume/3]).
 
+-include("include/hb.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
 -define(METERING_KEY, {dev_metering, state}).
@@ -239,6 +240,90 @@ bundler_upload_query_estimate_test() ->
             }
         },
     {ok, Expected} = hb_ao:resolve(Metering, EstimateReq, Opts).
+
+%% @doc P4 rejects unfunded raw ANS-104 uploads before the bundler runs.
+unfunded_raw_bundler_upload_rejected_test() ->
+    HostWallet = ar_wallet:new(),
+    UploaderWallet = ar_wallet:new(),
+    Rate = 2,
+    {ServerHandle, GatewayOpts} =
+        dev_bundler:start_mock_gateway(
+            #{
+                price => {200, <<"12345">>},
+                tx_anchor => {200, hb_util:encode(rand:bytes(32))}
+            }
+        ),
+    Processor =
+        #{
+            <<"device">> => <<"p4@1.0">>,
+            <<"ledger-device">> => <<"simple-pay@1.0">>,
+            <<"pricing-device">> => <<"metering@1.0">>
+        },
+    Opts =
+        GatewayOpts#{
+            <<"priv-wallet">> => HostWallet,
+            <<"store">> => hb_test_utils:test_store(),
+            <<"bundler-max-items">> => 1,
+            <<"metering-rates">> => #{
+                <<"arweave-bytes">> => Rate,
+                ?BEAM_REDUCTIONS => 0
+            },
+            <<"operator">> => ar_wallet:to_address(HostWallet),
+            <<"on">> => #{
+                <<"request">> => Processor,
+                <<"response">> => Processor
+            }
+        },
+    try
+        Node = hb_http_server:start_node(Opts),
+        RawItem =
+            ar_bundles:serialize(
+                ar_bundles:sign_item(
+                    #tx{
+                        data = <<"unfunded-raw-bundler-upload">>,
+                        tags = [{<<"content-type">>, <<"text/plain">>}]
+                    },
+                    UploaderWallet
+                )
+            ),
+        BaseURL =
+            case binary:last(Node) of
+                $/ -> binary:part(Node, 0, byte_size(Node) - 1);
+                _ -> Node
+            end,
+        URL =
+            binary_to_list(
+                <<BaseURL/binary,
+                    "/~bundler@1.0/item?codec-device=ans104@1.0">>
+            ),
+        {ok, {{_, Status, _}, _Headers, _Body}} =
+            httpc:request(
+                post,
+                {
+                    URL,
+                    [{"content-type", "application/octet-stream"}],
+                    "application/octet-stream",
+                    RawItem
+                },
+                [],
+                [{body_format, binary}]
+            ),
+        ?assertEqual(
+            402,
+            Status
+        ),
+        ?assertEqual(
+            0,
+            length(hb_mock_server:get_requests(tx, 0, ServerHandle, 200))
+        ),
+        ?assertEqual(
+            0,
+            length(hb_mock_server:get_requests(chunk, 0, ServerHandle, 200))
+        )
+    after
+        hb_mock_server:stop(ServerHandle),
+        dev_bundler:stop_server(Opts)
+    end.
 
 %% @doc BEAM reductions are metered between estimate and price.
 beam_reductions_price_test() ->
