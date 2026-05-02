@@ -134,7 +134,7 @@ estimate_request(EstimateReq, Opts) ->
     end.
 
 is_bundler_upload(Req, Opts) when is_map(Req) ->
-    Path = hb_maps:get(<<"path">>, Req, <<>>, Opts),
+    Path = path_without_query(hb_maps:get(<<"path">>, Req, <<>>, Opts)),
     lists:member(
         Path,
         [
@@ -146,6 +146,14 @@ is_bundler_upload(Req, Opts) when is_map(Req) ->
     );
 is_bundler_upload(_, _) ->
     false.
+
+path_without_query(Path) when is_binary(Path) ->
+    case binary:split(Path, <<"?">>) of
+        [CleanPath, _Query] -> CleanPath;
+        [CleanPath] -> CleanPath
+    end;
+path_without_query(Path) ->
+    Path.
 
 bundler_subject(Req, Opts) ->
     case hb_maps:find(<<"bundler-subject">>, Req, Opts) of
@@ -206,6 +214,31 @@ consume_is_not_device_key_test() ->
             Opts
         )
     ).
+
+%% @doc Bundler upload estimates match paths with query strings.
+bundler_upload_query_estimate_test() ->
+    Opts = #{
+        <<"store">> => hb_test_utils:test_store(),
+        <<"metering-rates">> => #{ <<"arweave-bytes">> => 2 }
+    },
+    Item =
+        hb_message:commit(
+            #{ <<"data">> => <<"metered-query-item">> },
+            #{ <<"priv-wallet">> => ar_wallet:new() }
+        ),
+    Expected =
+        2 * bundled_item_size(Item, Opts),
+    Metering = #{ <<"device">> => <<"metering@1.0">> },
+    EstimateReq =
+        #{
+            <<"path">> => <<"estimate">>,
+            <<"request">> => #{
+                <<"path">> => <<"/~bundler@1.0/item?codec-device=ans104@1.0">>,
+                <<"body">> => Item,
+                <<"bundler-subject">> => <<"body">>
+            }
+        },
+    {ok, Expected} = hb_ao:resolve(Metering, EstimateReq, Opts).
 
 %% @doc BEAM reductions are metered between estimate and price.
 beam_reductions_price_test() ->
