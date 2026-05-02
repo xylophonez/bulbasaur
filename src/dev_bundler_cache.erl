@@ -14,6 +14,7 @@
     write_item/2,
     write_tx/3,
     complete_tx/2,
+    get_item_bundle/2,
     load_bundle_states/1,
     load_tx/2,
     load_items/2,
@@ -47,6 +48,8 @@ link_item_to_tx(Item, TX, Opts) when is_map(Item) and is_map(TX) ->
 
 %% @doc Get the bundle TXID for a data item, or <<>> if not bundled.
 get_item_bundle(Item, Opts) when is_map(Item) ->
+    get_item_bundle(item_id(Item, Opts), Opts);
+get_item_bundle(Item, Opts) when is_binary(Item) ->
     Path = item_path(Item, Opts),
     case read_pseudopath(Path, Opts) of
         {ok, Value} -> Value;

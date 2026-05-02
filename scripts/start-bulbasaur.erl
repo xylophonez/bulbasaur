@@ -21,10 +21,17 @@ Port =
         false -> 8734;
         RawPort -> list_to_integer(RawPort)
     end.
-Store = #{
+PrimaryStore = #{
     <<"store-module">> => hb_store_fs,
     <<"name">> => <<"cache-bulbasaur-", (integer_to_binary(Port))/binary>>
 }.
+ArweaveStore = #{
+    <<"store-module">> => hb_store_arweave,
+    <<"name">> => <<"cache-bulbasaur-arweave-", (integer_to_binary(Port))/binary>>,
+    <<"index-store">> => [PrimaryStore],
+    <<"local-store">> => [PrimaryStore]
+}.
+Store = [PrimaryStore, ArweaveStore].
 
 WalletPath =
     case os:getenv("HB_KEY") of
@@ -182,6 +189,18 @@ Opts =
         bundler_beneficiary => Beneficiary,
         <<"bundler-beneficiary">> => Beneficiary,
         <<"bundler-max-items">> => BundlerMaxItems,
+        arweave_index_store => ArweaveStore,
+        <<"arweave-index-store">> => ArweaveStore,
+        arweave_mempool_copycat_on_bundle_complete => true,
+        <<"arweave-mempool-copycat-on-bundle-complete">> => true,
+        arweave_mempool_progress => true,
+        <<"arweave-mempool-progress">> => true,
+        arweave_index_workers => 1,
+        <<"arweave-index-workers">> => 1,
+        arweave_pending_chunk_poll_attempts => 20,
+        <<"arweave-pending-chunk-poll-attempts">> => 20,
+        arweave_pending_chunk_poll_ms => 500,
+        <<"arweave-pending-chunk-poll-ms">> => 500,
         simple_pay_price => 0,
         <<"simple-pay-price">> => 0,
         <<"metering-rates">> => #{
@@ -280,6 +299,7 @@ io:format(
     "Wallet: ~s~n"
     "Process route price: ~p AO base unit(s)~n"
     "Bundler byte price: ~p AO base unit(s)~n"
+    "Bundler optimistic cache: enabled~n"
     "AO root token: ~s~n"
     "Ledger process file: ~s~n"
     "Ledger process ID: ~s~n"

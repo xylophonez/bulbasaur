@@ -524,6 +524,7 @@ task_completed(
 %% @doc Mark a bundle as complete and remove it from state.
 bundle_complete(Bundle, State = #state{opts = Opts}) ->
     ok = dev_bundler_cache:complete_tx(Bundle#bundle.tx, Opts),
+    maybe_index_pending_bundle(Bundle, Opts),
     ElapsedTime =
         timer:now_diff(erlang:timestamp(), Bundle#bundle.start_time) / 1000000,
     ?event(
@@ -537,6 +538,48 @@ bundle_complete(Bundle, State = #state{opts = Opts}) ->
     ),
     run_completion_hooks(Bundle, Opts),
     State#state{bundles = maps:remove(Bundle#bundle.id, State#state.bundles)}.
+
+%% @doc Trigger mempool copycat for this just-posted bundle. This writes
+%% Arweave offset-index entries for the pending L1 bundle and its children so
+%% this node can resolve uploaded data items before gateway indexing catches up.
+maybe_index_pending_bundle(Bundle, Opts) ->
+    case hb_opts:get(arweave_mempool_copycat_on_bundle_complete, false, Opts) of
+        true ->
+            TXID = hb_message:id(Bundle#bundle.tx, signed, Opts),
+            Sender =
+                case hb_opts:get(operator, undefined, Opts) of
+                    undefined -> undefined;
+                    Operator -> hb_util:human_id(Operator)
+                end,
+            spawn(fun() -> index_pending_bundle(TXID, Sender, Opts) end),
+            ok;
+        false ->
+            ok
+    end.
+
+index_pending_bundle(TXID, Sender, Opts) ->
+    Req0 = #{ <<"path">> => <<"arweave">>, <<"mode">> => <<"mempool">> },
+    Req =
+        case Sender of
+            undefined -> Req0;
+            _ -> Req0#{ <<"sender">> => Sender }
+        end,
+    CopycatOpts = Opts#{
+        arweave_static_pending_txids => [TXID],
+        <<"arweave-static-pending-txids">> => [TXID]
+    },
+    Res =
+        hb_ao:resolve(
+            #{ <<"device">> => <<"copycat@1.0">> },
+            Req,
+            CopycatOpts
+        ),
+    ?event(
+        copycat_short,
+        {bundler_pending_copycat_finished,
+            {tx_id, {explicit, TXID}},
+            {result, Res}}
+    ).
 
 %% @doc Execute hooks for each completed bundled item and the full bundle.
 run_completion_hooks(Bundle, Opts) ->
@@ -747,6 +790,43 @@ unsigned_dataitem_test_parallel() ->
     after
         %% Always cleanup, even if test fails
         stop_test_servers(ServerHandle, NodeOpts)
+    end.
+
+optimistic_raw_cache_test_parallel() ->
+    Data = <<"optimistic-cache-data">>,
+    Item =
+        ar_bundles:sign_item(
+            #tx{
+                data = Data,
+                tags = [{<<"content-type">>, <<"text/plain">>}]
+            },
+            ar_wallet:new()
+        ),
+    Opts = #{
+        <<"priv-wallet">> => ar_wallet:new(),
+        <<"store">> => hb_test_utils:test_store(),
+        <<"bundler-max-items">> => 1000
+    },
+    try
+        StructuredItem =
+            hb_message:convert(
+                Item,
+                <<"structured@1.0">>,
+                <<"ans104@1.0">>,
+                Opts
+            ),
+        ItemID = hb_util:encode(ar_bundles:id(Item, signed)),
+        ?assertMatch({ok, _}, item(#{}, StructuredItem, Opts)),
+        {ok, Raw} =
+            dev_arweave:raw(
+                #{},
+                #{ <<"raw">> => ItemID },
+                Opts
+            ),
+        ?assertEqual(Data, maps:get(<<"body">>, Raw)),
+        ?assertEqual(<<"text/plain">>, maps:get(<<"content-type">>, Raw))
+    after
+        stop_server(Opts)
     end.
 
 idle_test() ->

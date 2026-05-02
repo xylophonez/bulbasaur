@@ -129,6 +129,12 @@ Bundle status            complete
 Arweave bundle           https://arweave.net/tx/<txid>
 ```
 
+The item should also be readable from the Bulbasaur node immediately after the
+paid POST because the bundler writes accepted uploads into the local cache. Once
+the bundle reaches `complete`, Bulbasaur runs a mempool-copycat pass for that
+bundle tx so pending Arweave offset reads are available before gateway indexing
+catches up.
+
 The beneficiary balance may be `404` before the upload if the account has not
 been credited in the local ledger yet. It should resolve after the bundle
 completion hook credits the beneficiary.

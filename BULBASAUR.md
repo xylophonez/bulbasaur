@@ -41,6 +41,12 @@ This branch adds the following Bulbasaur-specific pieces:
   as `bundler-settlement@1.0`. It runs after the bundler has posted and seeded
   the bundle, prices each completed item with `metering@1.0`, and transfers the
   local ledger balance from the node account to the beneficiary account.
+- `src/dev_arweave.erl`, `src/dev_copycat_arweave.erl`,
+  `src/hb_store_arweave.erl`, and `src/hb_store_arweave_offset.erl`: pending
+  Arweave/copycat indexing support. Bulbasaur serves newly accepted data items
+  from its local cache immediately, then runs mempool copycat after bundle
+  completion so pending bundle/item offsets are available before gateway
+  indexing catches up.
 - `src/hb_opts.erl`: preloads `ao-payment@1.0` so the verifier device is
   available through the normal HyperBEAM device map, and preloads
   `process-ledger@1.0`, `pricing-router@1.0`, and
@@ -138,6 +144,9 @@ Defaults:
   `BULBASAUR_BUNDLER_MAX_ITEMS=1` for local smoke testing.
 - Bundler beneficiary: defaults to the node/operator wallet, override with
   `BULBASAUR_BENEFICIARY=<wallet-address>`.
+- Bundler optimistic cache: enabled. Accepted data items can be read from the
+  node immediately through the local cache, and completed bundles trigger
+  `~copycat@1.0/arweave&mode=mempool` with a sender filter for the node wallet.
 - Paid route template: `/.*~process@1.0/.*`.
 - Paid bundler route templates: `/~bundler@1.0/tx` and
   `/~bundler@1.0/item`.
@@ -207,6 +216,16 @@ the `tx` alias. A regression test verifies that an unfunded signed upload to
 `/~bundler@1.0/item?codec-device=ans104@1.0` returns `402` before the bundler
 posts any transaction or chunk request to Arweave.
 
+The bundler has two optimistic read paths:
+
+- Immediately after a signed item is accepted, `~arweave@2.9/raw=<item-id>` can
+  fall back to the node's local upload cache, even before the item has been
+  dispatched in an L1 bundle.
+- After the bundle is posted and seeded, Bulbasaur starts a background
+  mempool-copycat pass for that exact bundle transaction. That writes pending
+  Arweave offset entries for the bundle and its child items, allowing Arweave
+  style reads to work before public gateways have indexed the bundle.
+
 The important token selector is not a knob on `p4@1.0`. It is the ledger
 process definition's `token` field. In this checkout, `BULBASAUR_AO_TOKEN`
 feeds that field on the local ledger process.
@@ -274,6 +293,8 @@ The broader bundler suite also passed during validation:
 ```sh
 HB_PORT=19116 rebar3 eunit --module=dev_bundler
 ```
+
+This includes the optimistic raw-cache regression for accepted bundler uploads.
 
 The repository-wide EUnit command must be run on a free HTTP port because
 `8734` is commonly occupied by a local Bulbasaur node:
