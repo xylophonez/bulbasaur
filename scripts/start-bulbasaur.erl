@@ -21,6 +21,10 @@ Port =
         false -> 8734;
         RawPort -> list_to_integer(RawPort)
     end.
+Store = #{
+    <<"store-module">> => hb_store_fs,
+    <<"name">> => <<"cache-bulbasaur-", (integer_to_binary(Port))/binary>>
+}.
 
 WalletPath =
     case os:getenv("HB_KEY") of
@@ -50,9 +54,18 @@ Beneficiary =
         false -> Operator;
         RawBeneficiary -> list_to_binary(RawBeneficiary)
     end.
+InitialBalance =
+    case {os:getenv("BULBASAUR_INITIAL_BALANCE_ADDRESS"), os:getenv("BULBASAUR_INITIAL_BALANCE")} of
+        {false, _} -> #{};
+        {_, false} -> #{};
+        {RawBalanceAddress, RawBalance} ->
+            #{ list_to_binary(RawBalanceAddress) => list_to_integer(RawBalance) }
+    end.
 LedgerCommitOpts = #{
     priv_wallet => Wallet,
-    <<"priv-wallet">> => Wallet
+    <<"priv-wallet">> => Wallet,
+    store => Store,
+    <<"store">> => Store
 }.
 
 LedgerBaseDef =
@@ -64,6 +77,7 @@ LedgerBaseDef =
         <<"authority">> => [Operator],
         <<"admin">> => Operator,
         <<"token">> => AOToken,
+        <<"balance">> => InitialBalance,
         <<"module">> => [
             #{
                 <<"content-type">> => <<"text/x-lua">>,
@@ -78,20 +92,35 @@ LedgerBaseDef =
         ]
     }.
 
+NewLedgerProc =
+    fun() ->
+        Proc =
+            hb_message:commit(
+                LedgerBaseDef,
+                LedgerCommitOpts,
+                <<"httpsig@1.0">>
+            ),
+        ok = filelib:ensure_dir(binary_to_list(LedgerProcPath)),
+        ok = file:write_file(LedgerProcPath, term_to_binary(Proc)),
+        Proc
+    end.
+
 LedgerProc =
     case file:read_file(LedgerProcPath) of
         {ok, LedgerProcBin} ->
-            binary_to_term(LedgerProcBin);
+            ExistingLedgerProc = binary_to_term(LedgerProcBin),
+            case hb_message:signers(ExistingLedgerProc, LedgerCommitOpts) of
+                [] ->
+                    io:format(
+                        "Regenerating unsigned/stale ledger process file: ~s~n",
+                        [LedgerProcPath]
+                    ),
+                    NewLedgerProc();
+                _ ->
+                    ExistingLedgerProc
+            end;
         {error, enoent} ->
-            NewLedgerProc =
-                hb_message:commit(
-                    LedgerBaseDef,
-                    LedgerCommitOpts,
-                    <<"httpsig@1.0">>
-                ),
-            ok = filelib:ensure_dir(binary_to_list(LedgerProcPath)),
-            ok = file:write_file(LedgerProcPath, term_to_binary(NewLedgerProc)),
-            NewLedgerProc;
+            NewLedgerProc();
         {error, LedgerProcReadError} ->
             error({failed_to_read_ledger_process, LedgerProcPath, LedgerProcReadError})
     end.
@@ -104,7 +133,7 @@ LedgerProcessID =
         LedgerCommitOpts
     ).
 LedgerCachePath = hb_util:human_id(LedgerCacheID).
-LedgerPath = <<"/", LedgerProcessID/binary, "~process@1.0">>.
+LedgerPath = <<"/ledger~node-process@1.0">>.
 
 Processor =
     #{
@@ -116,6 +145,10 @@ Processor =
         <<"pricing-routes">> => [
             #{
                 <<"template">> => <<"/~bundler@1.0/tx">>,
+                <<"pricing-device">> => <<"metering@1.0">>
+            },
+            #{
+                <<"template">> => <<"/~bundler@1.0/item">>,
                 <<"pricing-device">> => <<"metering@1.0">>
             }
         ]
@@ -140,6 +173,8 @@ Opts =
         priv_wallet => Wallet,
         <<"priv-key-location">> => WalletPath,
         <<"priv-wallet">> => Wallet,
+        store => Store,
+        <<"store">> => Store,
         operator => Operator,
         p4_recipient => Operator,
         <<"operator">> => Operator,
@@ -156,6 +191,7 @@ Opts =
         p4_non_chargable_routes => [
             #{ <<"template">> => <<"/*~node-process@1.0/*">> },
             #{ <<"template">> => << LedgerPath/binary, "/*" >> },
+            #{ <<"template">> => <<"/", LedgerProcessID/binary, "~process@1.0/*" >> },
             #{ <<"template">> => <<"/~ao-payment@1.0/*">> },
             #{ <<"template">> => <<"/~p4@1.0/balance">> },
             #{ <<"template">> => <<"/~meta@1.0/*">> }
@@ -163,6 +199,7 @@ Opts =
         <<"p4-non-chargable-routes">> => [
             #{ <<"template">> => <<"/*~node-process@1.0/*">> },
             #{ <<"template">> => << LedgerPath/binary, "/*" >> },
+            #{ <<"template">> => <<"/", LedgerProcessID/binary, "~process@1.0/*" >> },
             #{ <<"template">> => <<"/~ao-payment@1.0/*">> },
             #{ <<"template">> => <<"/~p4@1.0/balance">> },
             #{ <<"template">> => <<"/~meta@1.0/*">> }
@@ -186,6 +223,10 @@ Opts =
                 #{
                     <<"template">> => <<"/~bundler@1.0/tx">>,
                     <<"price">> => 0
+                },
+                #{
+                    <<"template">> => <<"/~bundler@1.0/item">>,
+                    <<"price">> => 0
                 }
             ]
         },
@@ -198,17 +239,24 @@ Opts =
                 #{
                     <<"template">> => <<"/~bundler@1.0/tx">>,
                     <<"price">> => 0
+                },
+                #{
+                    <<"template">> => <<"/~bundler@1.0/item">>,
+                    <<"price">> => 0
                 }
             ]
+        },
+        node_processes => #{
+            <<"ledger">> => LedgerBaseDef
         },
         <<"node-processes">> => #{
             <<"ledger">> => LedgerBaseDef
         },
         local_names => #{
-            <<"ledger">> => LedgerCachePath
+            <<"ledger">> => LedgerProcessID
         },
         <<"local-names">> => #{
-            <<"ledger">> => LedgerCachePath
+            <<"ledger">> => LedgerProcessID
         },
         on => #{
             <<"request">> => Processor,

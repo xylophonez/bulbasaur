@@ -135,7 +135,15 @@ estimate_request(EstimateReq, Opts) ->
 
 is_bundler_upload(Req, Opts) when is_map(Req) ->
     Path = hb_maps:get(<<"path">>, Req, <<>>, Opts),
-    Path =:= <<"/~bundler@1.0/tx">> orelse Path =:= <<"~bundler@1.0/tx">>;
+    lists:member(
+        Path,
+        [
+            <<"/~bundler@1.0/tx">>,
+            <<"~bundler@1.0/tx">>,
+            <<"/~bundler@1.0/item">>,
+            <<"~bundler@1.0/item">>
+        ]
+    );
 is_bundler_upload(_, _) ->
     false.
 

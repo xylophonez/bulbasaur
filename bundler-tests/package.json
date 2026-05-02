@@ -1,0 +1,16 @@
+{
+  "name": "bulbasaur-bundler-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone paid AO bundler upload tests for Bulbasaur.",
+  "scripts": {
+    "paid-upload": "node ./paid-bundler-upload.mjs"
+  },
+  "dependencies": {
+    "@dha-team/arbundles": "^1.0.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
