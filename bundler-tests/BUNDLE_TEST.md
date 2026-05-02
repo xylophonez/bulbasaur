@@ -16,10 +16,17 @@ wallets for the cleanest test:
 - `UPLOADER_WALLET`: Arweave JWK used by the test client. This wallet signs the
   data item and should be the AO-paying user.
 
-The local smoke-test command below seeds the uploader into Bulbasaur's local AO
-ledger so the paid route can be tested immediately. For a production-style AO
-deposit/import, use the `ao-payment@1.0` flow documented in `BULBASAUR.md` and
-then skip the `BULBASAUR_INITIAL_BALANCE_*` env vars.
+The upload test spends AO from Bulbasaur's local ledger. The command below
+pre-funds that local ledger with `BULBASAUR_INITIAL_BALANCE_*` so the paid
+bundler path can be tested immediately: signed upload, metered price, local
+ledger debit, Arweave bundle post, bundle completion hook, and beneficiary
+credit.
+
+That pre-funding is a local test shortcut. It does not perform the separate
+mainnet AO deposit/import step. To test the deposit/import device too, first
+send AO to the node deposit address and import it with the `ao-payment@1.0`
+flow documented in `BULBASAUR.md`; then start the node without the
+`BULBASAUR_INITIAL_BALANCE_*` env vars and run the same upload test.
 
 ## 2. Clone And Install
 
