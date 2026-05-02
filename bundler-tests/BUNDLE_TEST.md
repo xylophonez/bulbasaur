@@ -139,6 +139,11 @@ Arweave. The individual data item may take longer to appear at
 `https://arweave.net/<item-id>` because gateway indexing of bundled data items
 lags the bundle transaction.
 
+The default upload path in this test is the raw ANS-104-compatible route:
+`/~bundler@1.0/item?codec-device=ans104@1.0`. Bulbasaur also protects the
+`/~bundler@1.0/tx` alias. Both routes are priced by `metering@1.0` and checked
+by `p4@1.0` before the bundler accepts the item.
+
 ## 7. Real AO Deposit/Import Variant
 
 The default command in step 4 uses `BULBASAUR_INITIAL_BALANCE_*` to pre-fund the
@@ -230,7 +235,8 @@ TEXT_PAYLOAD="Bulbasaur paid AO upload $(date -Iseconds)-$RANDOM" \
 - `402`: the uploader does not have enough balance in the local Bulbasaur AO
   ledger. Import an AO deposit through `ao-payment@1.0`, or restart the local
   smoke test with `BULBASAUR_INITIAL_BALANCE_ADDRESS` set to the uploader
-  address.
+  address. For an unfunded signed upload, this is the expected protected-route
+  behavior; no bundle transaction or chunks should be posted.
 - No bundle txid appears: start the node with `BULBASAUR_BUNDLER_MAX_ITEMS=1`
   for immediate dispatch, or wait for idle dispatch.
 - Bundle status does not reach `complete`: check that the node wallet has AR and

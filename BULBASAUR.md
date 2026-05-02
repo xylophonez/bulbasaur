@@ -139,7 +139,8 @@ Defaults:
 - Bundler beneficiary: defaults to the node/operator wallet, override with
   `BULBASAUR_BENEFICIARY=<wallet-address>`.
 - Paid route template: `/.*~process@1.0/.*`.
-- Paid bundler route template: `/~bundler@1.0/tx`.
+- Paid bundler route templates: `/~bundler@1.0/tx` and
+  `/~bundler@1.0/item`.
 - Generic non-process routes are free because `simple-pay-price` is set to `0`.
   Bundler uploads are priced dynamically by `metering@1.0`, not by the static
   route price.
@@ -160,7 +161,7 @@ sequenceDiagram
     participant S as bundler-settlement@1.0
     participant BEN as Beneficiary wallet
 
-    U->>P4: POST signed ANS-104 item to /~bundler@1.0/tx
+    U->>P4: POST signed ANS-104 item to /~bundler@1.0/tx or /~bundler@1.0/item
     P4->>PR: estimate(request)
     PR->>M: estimate bundled arweave-bytes
     P4->>PL: balance(uploader) >= estimated price
@@ -200,6 +201,11 @@ account to the configured beneficiary.
 Arweave finality confirmation, but it is the point at which the local bundling
 job has completed. A regression test verifies that the completion hook does not
 fire while chunk seeding is still failing.
+
+The raw ANS-104 upload route is covered by the same P4/metering protection as
+the `tx` alias. A regression test verifies that an unfunded signed upload to
+`/~bundler@1.0/item?codec-device=ans104@1.0` returns `402` before the bundler
+posts any transaction or chunk request to Arweave.
 
 The important token selector is not a knob on `p4@1.0`. It is the ledger
 process definition's `token` field. In this checkout, `BULBASAUR_AO_TOKEN`
@@ -251,6 +257,37 @@ The device verifies:
 - the notice target is the Bulbasaur AO deposit address
 - the sender, credited recipient, and quantity match
 - the AO payment id has not already been imported by this node process
+
+## Validation Status
+
+Focused paid-bundler validation passes:
+
+```sh
+HB_PORT=19115 rebar3 eunit --module=dev_metering
+```
+
+This covers metered pricing, query-string upload paths, the P4 response charge,
+and the unfunded raw upload rejection.
+
+The broader bundler suite also passed during validation:
+
+```sh
+HB_PORT=19116 rebar3 eunit --module=dev_bundler
+```
+
+The repository-wide EUnit command must be run on a free HTTP port because
+`8734` is commonly occupied by a local Bulbasaur node:
+
+```sh
+HB_PORT=19116 rebar3 eunit
+```
+
+At the time this note was added, that full suite did not pass cleanly:
+`17 failed, 280 passed`. The failures were in pre-existing cache/link-loading
+and WASM/JSON interface tests, not in the paid bundler, metering, bundler
+settlement, AO payment, or process-ledger modules. Treat the paid bundler flow
+as validated by the focused tests and end-to-end script, not by a green
+repository-wide suite.
 
 Example balance check on the Bulbasaur node:
 
