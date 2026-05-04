@@ -16,6 +16,12 @@ BundlerMaxItems =
         RawBundlerMaxItems -> list_to_integer(RawBundlerMaxItems)
     end.
 
+BundlerDispatchMs =
+    case os:getenv("BULBASAUR_BUNDLER_DISPATCH_MS") of
+        false -> 2000;
+        RawBundlerDispatchMs -> list_to_integer(RawBundlerDispatchMs)
+    end.
+
 Port =
     case os:getenv("HB_PORT") of
         false -> 8734;
@@ -189,6 +195,9 @@ Opts =
         bundler_beneficiary => Beneficiary,
         <<"bundler-beneficiary">> => Beneficiary,
         <<"bundler-max-items">> => BundlerMaxItems,
+        bundler_max_items => BundlerMaxItems,
+        bundler_max_bundle_dispatch_delay => BundlerDispatchMs,
+        <<"bundler-max-bundle-dispatch-delay">> => BundlerDispatchMs,
         arweave_index_store => ArweaveStore,
         <<"arweave-index-store">> => ArweaveStore,
         arweave_mempool_copycat_on_bundle_complete => true,
@@ -299,6 +308,8 @@ io:format(
     "Wallet: ~s~n"
     "Process route price: ~p AO base unit(s)~n"
     "Bundler byte price: ~p AO base unit(s)~n"
+    "Bundler max items: ~p~n"
+    "Bundler dispatch delay: ~p ms~n"
     "Bundler optimistic cache: enabled~n"
     "AO root token: ~s~n"
     "Ledger process file: ~s~n"
@@ -313,6 +324,8 @@ io:format(
         WalletPath,
         Price,
         BundlerBytePrice,
+        BundlerMaxItems,
+        BundlerDispatchMs,
         AOToken,
         LedgerProcPath,
         LedgerProcessID,

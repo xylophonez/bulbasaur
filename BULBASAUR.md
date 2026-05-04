@@ -142,6 +142,8 @@ Defaults:
   `$0.0025797/KiB` at `$2.60/AO` plus a 20% operator premium.
 - Bundler item dispatch threshold: `1000` items by default, override with
   `BULBASAUR_BUNDLER_MAX_ITEMS=1` for local smoke testing.
+- Bundler dispatch delay: `2000` ms by default, override with
+  `BULBASAUR_BUNDLER_DISPATCH_MS=30000` for slower batching.
 - Bundler beneficiary: defaults to the node/operator wallet, override with
   `BULBASAUR_BENEFICIARY=<wallet-address>`.
 - Bundler optimistic cache: enabled. Accepted data items can be read from the
