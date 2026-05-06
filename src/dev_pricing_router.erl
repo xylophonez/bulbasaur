@@ -1,8 +1,8 @@
 %%% @doc Route requests to different P4 pricing devices.
 %%%
 %%% This is a small pricing-device adapter. It allows a node to keep static
-%%% route prices on `simple-pay@1.0' while sending specific routes, such as
-%%% bundler uploads, to `metering@1.0'.
+%%% route prices on `simple-pay@1.0' while sending specific routes to another
+%%% narrow pricing device.
 -module(dev_pricing_router).
 -export([info/1, estimate/3, price/3]).
 

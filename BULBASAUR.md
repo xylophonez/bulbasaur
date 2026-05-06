@@ -2,7 +2,7 @@
 
 This checkout is configured to run paid process execution and paid bundling
 using `p4@1.0` as the request/response hook, `pricing-router@1.0` to select a
-pricing device per route, `metering@1.0` for bundled-byte pricing, and
+pricing device per route, `arweave-byte-pricing@1.0` for bundler uploads, and
 `process-ledger@1.0` as the adapter to a local AO-token ledger process.
 
 Start it with:
@@ -36,11 +36,17 @@ This branch adds the following Bulbasaur-specific pieces:
   process and push operator-signed charge messages back into it.
 - `src/dev_pricing_router.erl`: HyperBEAM pricing-device adapter registered as
   `pricing-router@1.0`. It keeps static process route pricing on
-  `simple-pay@1.0`, while routing bundler uploads to `metering@1.0`.
+  `simple-pay@1.0`, while routing bundler uploads to
+  `arweave-byte-pricing@1.0`.
+- `src/dev_simple_oracle.erl` and `src/dev_arweave_byte_pricing.erl`: narrow
+  devices for `price-now(ticker)` and Arweave-byte-to-AO-base-unit pricing. The
+  pricing adapter uses canonical `metering@1.0`, `arweave@2.9/price`, and
+  `simple-oracle@1.0`.
 - `src/dev_bundler_settlement.erl`: bundle-completion hook handler registered
   as `bundler-settlement@1.0`. It runs after the bundler has posted and seeded
-  the bundle, prices each completed item with `metering@1.0`, and transfers the
-  local ledger balance from the node account to the beneficiary account.
+  the bundle, prices each completed item with `arweave-byte-pricing@1.0`, and
+  transfers the local ledger balance from the node account to the beneficiary
+  account.
 - `src/dev_arweave.erl`, `src/dev_copycat_arweave.erl`,
   `src/hb_store_arweave.erl`, and `src/hb_store_arweave_offset.erl`: pending
   Arweave/copycat indexing support. Bulbasaur serves newly accepted data items
@@ -49,8 +55,8 @@ This branch adds the following Bulbasaur-specific pieces:
   indexing catches up.
 - `src/hb_opts.erl`: preloads `ao-payment@1.0` so the verifier device is
   available through the normal HyperBEAM device map, and preloads
-  `process-ledger@1.0`, `pricing-router@1.0`, and
-  `bundler-settlement@1.0`.
+  `process-ledger@1.0`, `pricing-router@1.0`, `simple-oracle@1.0`,
+  `arweave-byte-pricing@1.0`, and `bundler-settlement@1.0`.
 - `scripts/start-bulbasaur.erl` and `scripts/start-bulbasaur.sh`: start the
   paid node, create/load the local ledger process, wire `p4@1.0` and
   `simple-pay@1.0`, and print the runtime IDs needed for testing.
@@ -83,7 +89,9 @@ flowchart LR
     P4["p4@1.0 request hook"]
     Router["pricing-router@1.0"]
     Pay["simple-pay@1.0"]
+    BytePrice["arweave-byte-pricing@1.0"]
     Meter["metering@1.0"]
+    Oracle["simple-oracle@1.0"]
     Settle["bundler-settlement@1.0"]
     PL["process-ledger@1.0 adapter"]
     Proc["Target process@1.0"]
@@ -107,7 +115,10 @@ flowchart LR
 
     Buyer -->|"signed ANS-104 bundler upload"| P4
     P4 -->|"select bundler pricing"| Router
-    Router -->|"quote and final byte price"| Meter
+    Router -->|"quote and final byte price"| BytePrice
+    BytePrice -->|"open/close session"| Meter
+    BytePrice -->|"AR byte quote"| AR
+    BytePrice -->|"AR/AO USD prices"| Oracle
     P4 -->|"charge uploader and credit node account"| PL
     P4 -->|"accepted upload"| Bundler
     Bundler -->|"post tx and seed chunks/proofs"| AR
@@ -137,9 +148,10 @@ Defaults:
 - Operator wallet: `bulbasaur-wallet.json`, override with `HB_KEY=/path/to/wallet.json`.
 - AO root token process: `0syT13r0s0tgPmIed95bJnuSqaD29HQNN8D3ElLSrsc`, override with `BULBASAUR_AO_TOKEN=<process-id>`.
 - Process route price: `1` AO base unit, override with `BULBASAUR_PROCESS_PRICE=25`.
-- Bundler upload byte price: `1162726` AO base units per bundled byte,
-  override with `BULBASAUR_BUNDLER_BYTE_PRICE=2`. The default approximates
-  `$0.0025797/KiB` at `$2.60/AO` plus a 20% operator premium.
+- Bundler upload byte price: dynamic by default. `arweave-byte-pricing@1.0`
+  asks `arweave@2.9` for `/price` and converts the AR winston cost to AO base
+  units using `simple-oracle@1.0` AR/AO USD prices. Override with
+  `BULBASAUR_BUNDLER_BYTE_PRICE=2` for fixed local testing.
 - Bundler item dispatch threshold: `1000` items by default, override with
   `BULBASAUR_BUNDLER_MAX_ITEMS=1` for local smoke testing.
 - Bundler dispatch delay: `2000` ms by default, override with
@@ -149,12 +161,19 @@ Defaults:
 - Bundler optimistic cache: enabled. Accepted data items can be read from the
   node immediately through the local cache, and completed bundles trigger
   `~copycat@1.0/arweave&mode=mempool` with a sender filter for the node wallet.
+- Confirmed Arweave indexing: enabled by default. The startup script starts an
+  internal worker that runs `~copycat@1.0/arweave?from=-1&to=-10` every
+  `5-minutes`, so data items that were first indexed through the mempool get
+  rewritten to durable confirmed Arweave offsets after their bundle is mined.
+  Override the window with `BULBASAUR_ARWEAVE_BLOCK_COPYCAT_DEPTH=50`, override
+  the cadence with `BULBASAUR_ARWEAVE_BLOCK_COPYCAT_INTERVAL=1-minute`, or
+  disable it with `BULBASAUR_ARWEAVE_BLOCK_COPYCAT_INTERVAL=false`.
 - Paid route template: `/.*~process@1.0/.*`.
 - Paid bundler route templates: `/~bundler@1.0/tx` and
   `/~bundler@1.0/item`.
 - Generic non-process routes are free because `simple-pay-price` is set to `0`.
-  Bundler uploads are priced dynamically by `metering@1.0`, not by the static
-  route price.
+  Bundler uploads are priced dynamically by `arweave-byte-pricing@1.0`, not by
+  the static route price.
 
 ## Paid Bundling Flow
 
@@ -164,7 +183,9 @@ sequenceDiagram
     participant U as Uploader wallet
     participant P4 as p4@1.0
     participant PR as pricing-router@1.0
+    participant BP as arweave-byte-pricing@1.0
     participant M as metering@1.0
+    participant O as simple-oracle@1.0
     participant PL as process-ledger@1.0
     participant L as Local AO-token ledger
     participant B as bundler@1.0
@@ -174,7 +195,10 @@ sequenceDiagram
 
     U->>P4: POST signed ANS-104 item to /~bundler@1.0/tx or /~bundler@1.0/item
     P4->>PR: estimate(request)
-    PR->>M: estimate bundled arweave-bytes
+    PR->>BP: estimate(request)
+    BP->>M: open metering session
+    BP->>AR: /price(size)
+    BP->>O: price-now(AR), price-now(AO)
     P4->>PL: balance(uploader) >= estimated price
     PL->>L: read uploader balance
     L-->>PL: balance
@@ -184,14 +208,18 @@ sequenceDiagram
         P4->>B: execute bundler upload
         B->>M: consume(arweave-bytes, bundled item size)
         B-->>P4: 200 accepted with item id
-        P4->>M: price(response)
+        P4->>PR: price(response)
+        PR->>BP: final price(response)
+        BP->>M: close metering and read arweave-bytes
+        BP->>AR: /price(size)
+        BP->>O: price-now(AR), price-now(AO)
         P4->>PL: charge uploader and credit node account
         PL->>L: operator-signed charge
         B->>AR: post bundle transaction
         B->>AR: seed chunks/proofs
         AR-->>B: 200 for tx and all required chunks/proofs
         B->>S: bundled-message-complete hook
-        S->>M: quote(arweave-bytes, bundled item size)
+        S->>BP: quote(arweave-bytes, bundled item size)
         S->>PL: charge node account and credit beneficiary
         PL->>L: operator-signed settlement charge
         L-->>BEN: beneficiary local balance increases
@@ -205,7 +233,7 @@ is debited when P4 successfully returns the bundler POST response, crediting the
 node's local ledger account. The delay between that accepted upload and
 `bundled-message-complete` is the settlement window. After `bundle_complete`
 has posted the transaction and seeded all required chunks/proofs, the
-`bundled-message-complete` hook settles the same metered amount from the node
+`bundled-message-complete` hook settles the same priced amount from the node
 account to the configured beneficiary.
 
 `bundle_complete` is the bundler's "posted and seeded" signal. It is not an
@@ -213,7 +241,7 @@ Arweave finality confirmation, but it is the point at which the local bundling
 job has completed. A regression test verifies that the completion hook does not
 fire while chunk seeding is still failing.
 
-The raw ANS-104 upload route is covered by the same P4/metering protection as
+The raw ANS-104 upload route is covered by the same P4/pricing protection as
 the `tx` alias. A regression test verifies that an unfunded signed upload to
 `/~bundler@1.0/item?codec-device=ans104@1.0` returns `402` before the bundler
 posts any transaction or chunk request to Arweave.

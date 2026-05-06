@@ -14,9 +14,8 @@
 %%% `metering-rates' in the node message as a map of resource name to AO token
 %%% units per resource unit.
 -module(dev_metering).
--export([info/1, estimate/3, price/3, quote/3, is_active/0, consume/3]).
+-export([info/1, estimate/3, price/3, is_active/0, consume/3]).
 
--include("include/hb.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
 -define(METERING_KEY, {dev_metering, state}).
@@ -28,13 +27,12 @@ info(_) ->
         exports =>
             [
                 <<"estimate">>,
-                <<"price">>,
-                <<"quote">>
+                <<"price">>
             ]
     }.
 
 %% @doc Start a metering session for the request.
-estimate(_Base, EstimateReq, Opts) ->
+estimate(_Base, _EstimateReq, _Opts) ->
     {reductions, Reductions} = erlang:process_info(self(), reductions),
     erlang:put(
         ?METERING_KEY,
@@ -43,7 +41,7 @@ estimate(_Base, EstimateReq, Opts) ->
             meters => #{}
         }
     ),
-    {ok, estimate_request(EstimateReq, Opts)}.
+    {ok, 0}.
 
 %% @doc Close the metering session and calculate the final AO token price.
 price(_Base, _PriceReq, Opts) ->
@@ -63,12 +61,6 @@ price(_Base, _PriceReq, Opts) ->
         ),
     erlang:erase(?METERING_KEY),
     {ok, Price}.
-
-%% @doc Price a single resource amount without opening a metering session.
-quote(_Base, Req, Opts) ->
-    Resource = hb_ao:normalize_key(hb_maps:get(<<"resource">>, Req, <<>>, Opts)),
-    Amount = hb_util:int(hb_maps:get(<<"amount">>, Req, 0, Opts)),
-    {ok, resource_price(Resource, Amount, Opts)}.
 
 %% @doc Return whether the current process has an active metering session.
 is_active() ->
@@ -118,65 +110,6 @@ add_meter(Resource, Amount, State) ->
             }
     }.
 
-estimate_request(EstimateReq, Opts) ->
-    Req =
-        hb_ao:get(
-            <<"request">>,
-            EstimateReq,
-            undefined,
-            Opts#{ <<"hashpath">> => ignore }
-        ),
-    case is_bundler_upload(Req, Opts) of
-        true ->
-            Item = bundler_subject(Req, Opts),
-            resource_price(<<"arweave-bytes">>, bundled_item_size(Item, Opts), Opts);
-        false ->
-            0
-    end.
-
-is_bundler_upload(Req, Opts) when is_map(Req) ->
-    Path = path_without_query(hb_maps:get(<<"path">>, Req, <<>>, Opts)),
-    lists:member(
-        Path,
-        [
-            <<"/~bundler@1.0/tx">>,
-            <<"~bundler@1.0/tx">>,
-            <<"/~bundler@1.0/item">>,
-            <<"~bundler@1.0/item">>
-        ]
-    );
-is_bundler_upload(_, _) ->
-    false.
-
-path_without_query(Path) when is_binary(Path) ->
-    case binary:split(Path, <<"?">>) of
-        [CleanPath, _Query] -> CleanPath;
-        [CleanPath] -> CleanPath
-    end;
-path_without_query(Path) ->
-    Path.
-
-bundler_subject(Req, Opts) ->
-    case hb_maps:find(<<"bundler-subject">>, Req, Opts) of
-        {ok, SubjectKey} -> hb_maps:get(SubjectKey, Req, Req, Opts);
-        error -> Req
-    end.
-
-bundled_item_size(Item, Opts) ->
-    TX =
-        hb_message:convert(
-            Item,
-            #{ <<"device">> => <<"ans104@1.0">>, <<"bundle">> => true },
-            <<"structured@1.0">>,
-            Opts
-        ),
-    byte_size(ar_bundles:serialize(TX)).
-
-resource_price(Resource, Amount, Opts) ->
-    Rates = hb_opts:get(<<"metering-rates">>, #{}, Opts),
-    Rate = hb_util:int(hb_maps:get(Resource, Rates, 0, Opts)),
-    Amount * Rate.
-
 %%% Tests
 
 %% @doc Metering outside an active session is a no-op.
@@ -215,115 +148,6 @@ consume_is_not_device_key_test() ->
             Opts
         )
     ).
-
-%% @doc Bundler upload estimates match paths with query strings.
-bundler_upload_query_estimate_test() ->
-    Opts = #{
-        <<"store">> => hb_test_utils:test_store(),
-        <<"metering-rates">> => #{ <<"arweave-bytes">> => 2 }
-    },
-    Item =
-        hb_message:commit(
-            #{ <<"data">> => <<"metered-query-item">> },
-            #{ <<"priv-wallet">> => ar_wallet:new() }
-        ),
-    Expected =
-        2 * bundled_item_size(Item, Opts),
-    Metering = #{ <<"device">> => <<"metering@1.0">> },
-    EstimateReq =
-        #{
-            <<"path">> => <<"estimate">>,
-            <<"request">> => #{
-                <<"path">> => <<"/~bundler@1.0/item?codec-device=ans104@1.0">>,
-                <<"body">> => Item,
-                <<"bundler-subject">> => <<"body">>
-            }
-        },
-    {ok, Expected} = hb_ao:resolve(Metering, EstimateReq, Opts).
-
-%% @doc P4 rejects unfunded raw ANS-104 uploads before the bundler runs.
-unfunded_raw_bundler_upload_rejected_test() ->
-    HostWallet = ar_wallet:new(),
-    UploaderWallet = ar_wallet:new(),
-    Rate = 2,
-    {ServerHandle, GatewayOpts} =
-        dev_bundler:start_mock_gateway(
-            #{
-                price => {200, <<"12345">>},
-                tx_anchor => {200, hb_util:encode(rand:bytes(32))}
-            }
-        ),
-    Processor =
-        #{
-            <<"device">> => <<"p4@1.0">>,
-            <<"ledger-device">> => <<"simple-pay@1.0">>,
-            <<"pricing-device">> => <<"metering@1.0">>
-        },
-    Opts =
-        GatewayOpts#{
-            <<"priv-wallet">> => HostWallet,
-            <<"store">> => hb_test_utils:test_store(),
-            <<"bundler-max-items">> => 1,
-            <<"metering-rates">> => #{
-                <<"arweave-bytes">> => Rate,
-                ?BEAM_REDUCTIONS => 0
-            },
-            <<"operator">> => ar_wallet:to_address(HostWallet),
-            <<"on">> => #{
-                <<"request">> => Processor,
-                <<"response">> => Processor
-            }
-        },
-    try
-        Node = hb_http_server:start_node(Opts),
-        RawItem =
-            ar_bundles:serialize(
-                ar_bundles:sign_item(
-                    #tx{
-                        data = <<"unfunded-raw-bundler-upload">>,
-                        tags = [{<<"content-type">>, <<"text/plain">>}]
-                    },
-                    UploaderWallet
-                )
-            ),
-        BaseURL =
-            case binary:last(Node) of
-                $/ -> binary:part(Node, 0, byte_size(Node) - 1);
-                _ -> Node
-            end,
-        URL =
-            binary_to_list(
-                <<BaseURL/binary,
-                    "/~bundler@1.0/item?codec-device=ans104@1.0">>
-            ),
-        {ok, {{_, Status, _}, _Headers, _Body}} =
-            httpc:request(
-                post,
-                {
-                    URL,
-                    [{"content-type", "application/octet-stream"}],
-                    "application/octet-stream",
-                    RawItem
-                },
-                [],
-                [{body_format, binary}]
-            ),
-        ?assertEqual(
-            402,
-            Status
-        ),
-        ?assertEqual(
-            0,
-            length(hb_mock_server:get_requests(tx, 0, ServerHandle, 200))
-        ),
-        ?assertEqual(
-            0,
-            length(hb_mock_server:get_requests(chunk, 0, ServerHandle, 200))
-        )
-    after
-        hb_mock_server:stop(ServerHandle),
-        dev_bundler:stop_server(Opts)
-    end.
 
 %% @doc BEAM reductions are metered between estimate and price.
 beam_reductions_price_test() ->

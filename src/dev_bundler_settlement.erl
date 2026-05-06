@@ -33,7 +33,7 @@ quote(Base, Size, Opts) ->
         hb_maps:get(
             <<"pricing-device">>,
             Base,
-            <<"metering@1.0">>,
+            <<"arweave-byte-pricing@1.0">>,
             Opts
         ),
     hb_ao:resolve(

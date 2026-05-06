@@ -11,7 +11,7 @@ fi
 
 NODE_URL="${NODE_URL:-http://localhost:8734}"
 LEDGER_ROUTE="${LEDGER_ROUTE:-/ledger~node-process@1.0}"
-BYTE_PRICE="${BYTE_PRICE:-1162726}"
+BYTE_PRICE="${BYTE_PRICE:-dynamic}"
 TEXT_PAYLOAD="${TEXT_PAYLOAD:-Bulbasaur paid AO bundler upload smoke test $(date -Iseconds)-$RANDOM}"
 GATEWAY="${GATEWAY:-https://arweave.net}"
 TIMEOUT_MS="${TIMEOUT_MS:-240000}"

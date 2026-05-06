@@ -37,7 +37,7 @@ const defaults = {
   node: "http://localhost:8734",
   gateway: "https://arweave.net",
   text: "Hello from a paid AO bundler upload",
-  bytePrice: "1162726",
+  bytePrice: "dynamic",
   aoDecimals: "12",
   timeoutMs: "240000",
   pollMs: "2000",
@@ -58,7 +58,7 @@ function usage() {
       `  --text <string>             Text payload to upload (default '${defaults.text}')`,
       "  --text-file <path>          Read text payload from a file instead of --text",
       `  --gateway <url>             Gateway to poll for visibility (default ${defaults.gateway})`,
-      `  --byte-price <units>        AO base units per bundled byte for local estimate (default ${defaults.bytePrice})`,
+      `  --byte-price <units>        AO base units per bundled byte for local estimate, or dynamic (default ${defaults.bytePrice})`,
       `  --ao-decimals <n>           AO decimals for display only (default ${defaults.aoDecimals})`,
       "",
       "Optional inspection:",
@@ -110,8 +110,9 @@ function parseArgs(argv) {
   args.ledgerRoute = args.ledger_route;
   args.saveRaw = args.save_raw;
   if (!args.wallet) throw new Error("--wallet is required");
-  if (!/^\d+$/.test(String(args.bytePrice))) {
-    throw new Error("--byte-price must be an integer AO base-unit amount");
+  args.bytePrice = String(args.bytePrice).toLowerCase();
+  if (args.bytePrice !== "dynamic" && !/^\d+$/.test(args.bytePrice)) {
+    throw new Error("--byte-price must be an integer AO base-unit amount or dynamic");
   }
   return args;
 }
@@ -471,7 +472,12 @@ async function main() {
   logKV("Wallet address", address);
   logKV("Text bytes", Buffer.byteLength(text, "utf8"));
   logKV("Ledger route", ledgerRoute || "(not provided; balance checks skipped)");
-  logKV("Byte price", `${args.bytePrice} AO base units / bundled byte`);
+  logKV(
+    "Byte price",
+    args.bytePrice === "dynamic"
+      ? "dynamic node quote"
+      : `${args.bytePrice} AO base units / bundled byte`,
+  );
   logKV("Poll timeout", `${timeoutMs}ms`);
 
   let beforeUploaderBalance;
@@ -488,13 +494,20 @@ async function main() {
 
   logStep("3. Build and verify ANS-104 data item");
   const item = await makeDataItem(jwk, text);
-  const estimatedCharge = BigInt(item.raw.length) * BigInt(args.bytePrice);
+  const estimatedCharge = /^\d+$/.test(args.bytePrice)
+    ? BigInt(item.raw.length) * BigInt(args.bytePrice)
+    : null;
   logKV("Item id", item.id);
   logKV("Verified id", item.verifiedId);
   logKV("Signature valid", String(item.valid));
   logKV("Signed bytes", item.raw.length);
   logKV("Nonce tag", item.nonce);
-  logKV("Local estimate", `${estimatedCharge} base units (${prettyAo(estimatedCharge, aoDecimals)} AO)`);
+  logKV(
+    "Local estimate",
+    estimatedCharge === null
+      ? "(dynamic; quoted by node)"
+      : `${estimatedCharge} base units (${prettyAo(estimatedCharge, aoDecimals)} AO)`,
+  );
   if (!item.valid) throw new Error("Signed ANS-104 item failed local signature verification");
   if (args.saveRaw) {
     await writeFile(args.saveRaw, item.raw);

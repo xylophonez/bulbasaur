@@ -6,8 +6,19 @@ Price =
 
 BundlerBytePrice =
     case os:getenv("BULBASAUR_BUNDLER_BYTE_PRICE") of
-        false -> 1162726;
+        false -> dynamic;
+        "dynamic" -> dynamic;
         RawBundlerBytePrice -> list_to_integer(RawBundlerBytePrice)
+    end.
+MeteringRates =
+    #{ <<"beam-reductions">> => 0 }.
+BundlerBytePriceLabel =
+    case BundlerBytePrice of
+        dynamic ->
+            <<"dynamic oracle">>;
+        _ ->
+            <<(integer_to_binary(BundlerBytePrice))/binary,
+                " AO base unit(s)">>
     end.
 
 BundlerMaxItems =
@@ -20,6 +31,20 @@ BundlerDispatchMs =
     case os:getenv("BULBASAUR_BUNDLER_DISPATCH_MS") of
         false -> 2000;
         RawBundlerDispatchMs -> list_to_integer(RawBundlerDispatchMs)
+    end.
+
+ArweaveBlockCopycatInterval =
+    case os:getenv("BULBASAUR_ARWEAVE_BLOCK_COPYCAT_INTERVAL") of
+        false -> <<"5-minutes">>;
+        "false" -> disabled;
+        "0" -> disabled;
+        RawBlockCopycatInterval -> list_to_binary(RawBlockCopycatInterval)
+    end.
+
+ArweaveBlockCopycatDepth =
+    case os:getenv("BULBASAUR_ARWEAVE_BLOCK_COPYCAT_DEPTH") of
+        false -> 10;
+        RawBlockCopycatDepth -> list_to_integer(RawBlockCopycatDepth)
     end.
 
 Port =
@@ -37,7 +62,11 @@ ArweaveStore = #{
     <<"index-store">> => [PrimaryStore],
     <<"local-store">> => [PrimaryStore]
 }.
-Store = [PrimaryStore, ArweaveStore].
+GatewayStore = #{
+    <<"store-module">> => hb_store_gateway,
+    <<"local-store">> => [PrimaryStore]
+}.
+Store = [PrimaryStore, ArweaveStore, GatewayStore].
 
 WalletPath =
     case os:getenv("HB_KEY") of
@@ -158,11 +187,11 @@ Processor =
         <<"pricing-routes">> => [
             #{
                 <<"template">> => <<"/~bundler@1.0/tx">>,
-                <<"pricing-device">> => <<"metering@1.0">>
+                <<"pricing-device">> => <<"arweave-byte-pricing@1.0">>
             },
             #{
                 <<"template">> => <<"/~bundler@1.0/item">>,
-                <<"pricing-device">> => <<"metering@1.0">>
+                <<"pricing-device">> => <<"arweave-byte-pricing@1.0">>
             }
         ]
     }.
@@ -171,7 +200,7 @@ BundlerSettlement =
     #{
         <<"device">> => <<"bundler-settlement@1.0">>,
         <<"ledger-device">> => <<"process-ledger@1.0">>,
-        <<"pricing-device">> => <<"metering@1.0">>,
+        <<"pricing-device">> => <<"arweave-byte-pricing@1.0">>,
         <<"ledger-path">> => LedgerPath,
         <<"settlement-account">> => Operator,
         <<"beneficiary">> => Beneficiary,
@@ -212,10 +241,8 @@ Opts =
         <<"arweave-pending-chunk-poll-ms">> => 500,
         simple_pay_price => 0,
         <<"simple-pay-price">> => 0,
-        <<"metering-rates">> => #{
-            <<"arweave-bytes">> => BundlerBytePrice,
-            <<"beam-reductions">> => 0
-        },
+        <<"arweave-byte-price">> => BundlerBytePrice,
+        <<"metering-rates">> => MeteringRates,
         p4_non_chargable_routes => [
             #{ <<"template">> => <<"/*~node-process@1.0/*">> },
             #{ <<"template">> => << LedgerPath/binary, "/*" >> },
@@ -301,16 +328,63 @@ Opts =
 Node = hb_http_server:start_node(Opts).
 {ok, _LedgerScheduleRes} = hb_http:post(Node, <<"/schedule">>, LedgerProc, Opts).
 
+ArweaveBlockCopycatPath =
+    <<"/~copycat@1.0/arweave?from=-1&to=-",
+        (integer_to_binary(ArweaveBlockCopycatDepth))/binary>>,
+ParseIntervalMs =
+    fun(BinInterval) ->
+        [AmountBin, UnitBin] = binary:split(BinInterval, <<"-">>),
+        Amount = binary_to_integer(AmountBin),
+        Unit = string:lowercase(binary_to_list(UnitBin)),
+        Multiplier =
+            case Unit of
+                "millisecond" ++ _ -> 1;
+                "second" ++ _ -> 1000;
+                "minute" ++ _ -> 60 * 1000;
+                "hour" ++ _ -> 60 * 60 * 1000;
+                "day" ++ _ -> 24 * 60 * 60 * 1000
+            end,
+        Amount * Multiplier
+    end,
+ArweaveBlockCopycatWorker =
+    case ArweaveBlockCopycatInterval of
+        disabled ->
+            disabled;
+        _ ->
+            IntervalMs = ParseIntervalMs(ArweaveBlockCopycatInterval),
+            spawn(
+                fun Loop() ->
+                    try hb_http:get(Node, ArweaveBlockCopycatPath, Opts) of
+                        _ -> ok
+                    catch
+                        Class:Reason:Stack ->
+                            hb_event:log(
+                                cron_error,
+                                {arweave_block_copycat_error,
+                                    {path, ArweaveBlockCopycatPath},
+                                    {error, Class, Reason, {trace, Stack}}
+                                }
+                            )
+                    end,
+                    timer:sleep(IntervalMs),
+                    Loop()
+                end
+            )
+    end.
+
 io:format(
     "~nBulbasaur paid-process node started at ~s~n"
     "Operator: ~s~n"
     "Bundler beneficiary: ~s~n"
     "Wallet: ~s~n"
     "Process route price: ~p AO base unit(s)~n"
-    "Bundler byte price: ~p AO base unit(s)~n"
+    "Bundler byte price: ~s~n"
     "Bundler max items: ~p~n"
     "Bundler dispatch delay: ~p ms~n"
     "Bundler optimistic cache: enabled~n"
+    "Arweave block copycat interval: ~p~n"
+    "Arweave block copycat depth: ~p block(s)~n"
+    "Arweave block copycat worker: ~p~n"
     "AO root token: ~s~n"
     "Ledger process file: ~s~n"
     "Ledger process ID: ~s~n"
@@ -323,9 +397,12 @@ io:format(
         Beneficiary,
         WalletPath,
         Price,
-        BundlerBytePrice,
+        BundlerBytePriceLabel,
         BundlerMaxItems,
         BundlerDispatchMs,
+        ArweaveBlockCopycatInterval,
+        ArweaveBlockCopycatDepth,
+        ArweaveBlockCopycatWorker,
         AOToken,
         LedgerProcPath,
         LedgerProcessID,

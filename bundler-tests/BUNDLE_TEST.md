@@ -108,7 +108,7 @@ node bundler-tests/paid-bundler-upload.mjs \
   --upload-path "/~bundler@1.0/item?codec-device=ans104@1.0" \
   --ledger-route "/ledger~node-process@1.0" \
   --beneficiary "$BENEFICIARY" \
-  --byte-price 1162726 \
+  --byte-price dynamic \
   --gateway https://arweave.net \
   --timeout-ms 240000 \
   --poll-ms 2000 \
@@ -140,6 +140,16 @@ the bundle reaches `complete`, Bulbasaur runs a mempool-copycat pass for that
 bundle tx so pending Arweave offset reads are available before gateway indexing
 catches up.
 
+After the bundle is mined, the pending mempool entry can disappear. Bulbasaur's
+startup script also runs a confirmed-block copycat worker over the recent Arweave
+tip window so those mempool-relative offsets are rewritten to durable confirmed
+offsets. If an old item stops resolving with an ANS-104 parse error, run a
+one-shot copycat for the containing block, for example:
+
+```sh
+curl "$NODE_URL/~copycat@1.0/arweave?from=<block-height>&to=<block-height>"
+```
+
 The beneficiary balance may be `404` before the upload if the account has not
 been credited in the local ledger yet. It should resolve after the bundle
 completion hook credits the beneficiary.
@@ -152,8 +162,9 @@ lags the bundle transaction.
 
 The default upload path in this test is the raw ANS-104-compatible route:
 `/~bundler@1.0/item?codec-device=ans104@1.0`. Bulbasaur also protects the
-`/~bundler@1.0/tx` alias. Both routes are priced by `metering@1.0` and checked
-by `p4@1.0` before the bundler accepts the item.
+`/~bundler@1.0/tx` alias. Both routes are priced by
+`arweave-byte-pricing@1.0` and checked by `p4@1.0` before the bundler accepts
+the item.
 
 ## 7. Real AO Deposit/Import Variant
 
