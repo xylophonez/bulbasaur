@@ -12,6 +12,7 @@
 -define(DEFAULT_DAYS, 90).
 -define(DEFAULT_CACHE_TTL_MS, 300_000).
 -define(CACHE_TABLE, dev_simple_oracle_cache).
+-define(CACHE_SERVER, {?MODULE, cache}).
 
 %% @doc Device API information.
 info(_) ->
@@ -329,13 +330,13 @@ cached(Key, Opts, Fun) ->
         false ->
             ensure_cache(),
             Now = erlang:system_time(millisecond),
-            case ets:lookup(?CACHE_TABLE, Key) of
+            case cache_lookup(Key) of
                 [{Key, Timestamp, Price}] when Now - Timestamp =< TTL ->
                     {ok, Price};
                 _ ->
                     case Fun() of
                         {ok, Price} ->
-                            ets:insert(?CACHE_TABLE, {Key, Now, Price}),
+                            cache_insert(Key, Now, Price),
                             {ok, Price};
                         Error ->
                             Error
@@ -345,15 +346,41 @@ cached(Key, Opts, Fun) ->
 
 %% @doc Ensure the oracle cache table exists.
 ensure_cache() ->
+    PID = hb_name:singleton(?CACHE_SERVER, fun cache_server/0),
+    hb_util:wait_until(
+        fun() -> ets:info(?CACHE_TABLE, owner) =:= PID end,
+        1000
+    ),
+    ok.
+
+cache_server() ->
     case ets:info(?CACHE_TABLE) of
         undefined ->
-            try ets:new(?CACHE_TABLE, [named_table, public, set]) of
-                _ -> ok
-            catch
-                error:badarg -> ok
-            end;
+            ets:new(
+                ?CACHE_TABLE,
+                [
+                    named_table,
+                    public,
+                    set,
+                    {read_concurrency, true},
+                    {write_concurrency, true}
+                ]
+            ),
+            receive stop -> ok end;
         _ ->
-            ok
+            timer:sleep(100),
+            cache_server()
+    end.
+
+cache_lookup(Key) ->
+    try ets:lookup(?CACHE_TABLE, Key)
+    catch error:badarg -> []
+    end.
+
+cache_insert(Key, Timestamp, Price) ->
+    try ets:insert(?CACHE_TABLE, {Key, Timestamp, Price}) of
+        true -> ok
+    catch error:badarg -> ok
     end.
 
 %%% Tests
@@ -371,6 +398,11 @@ source_url_dynamic_date_test() ->
             "start=2026-02-05&end=2026-05-06&days=90">>,
         source_url(Source, 90, {2026, 5, 6})
     ).
+
+%% @doc Cache table is owned by a singleton process, not a request process.
+cache_owner_test() ->
+    ensure_cache(),
+    ?assertNotEqual(self(), ets:info(?CACHE_TABLE, owner)).
 
 %% @doc The parser averages latest prices from relay-fetched source shapes.
 price_now_mock_sources_test() ->
